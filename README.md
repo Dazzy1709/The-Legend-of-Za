@@ -1,6 +1,6 @@
 # The Legend of Zaza
 
-A 3D action RPG built with Babylon.js, React and Vite.
+A 3D action RPG built with Babylon.js, React and Vite. Dive into the extensive but small world of Eladoria and help Clipper Zaza find the holy Za.
 
 ```bash
 npm install
