@@ -15,8 +15,8 @@ export interface SkyWeatherParams {
   cloudDarkness: number;
 }
 
-const CLOUD_ALTITUDE = 220; // well above the tallest buildings/mountains
-const CLOUD_LAYER_SIZE = 700;
+const CLOUD_ALTITUDE = 420; // above the mountain peaks
+const CLOUD_LAYER_SIZE = 3200;
 const CLOUD_DRIFT_SPEED = 0.006; // texture uOffset/sec — slow, so it reads as drifting, not scrolling
 
 /**
@@ -48,7 +48,8 @@ export class SkyBuilder {
     // point, which is what was actually behind the sky not reading as
     // covering the whole sky properly (visible seams/discontinuities
     // near the box's own corners, not a coverage-radius problem).
-    this.mesh = MeshBuilder.CreateSphere("skyDome", { diameter: 900, segments: 24 }, scene);
+    // Bigger than the world, so the far mountains are never cut off by it.
+    this.mesh = MeshBuilder.CreateSphere("skyDome", { diameter: 6000, segments: 24 }, scene);
     this.mesh.infiniteDistance = true;
 
     this.material = new SkyMaterial("skyMat", scene);
@@ -69,6 +70,9 @@ export class SkyBuilder {
 
     this.cloudMaterial = new StandardMaterial("cloudMat", scene);
     const cloudTex = createCloudTexture(scene);
+    // Same cloud size as before over the much bigger layer.
+    cloudTex.uScale = 14;
+    cloudTex.vScale = 14;
     this.cloudTexture = cloudTex;
     this.cloudMaterial.diffuseTexture = cloudTex;
     this.cloudMaterial.opacityTexture = cloudTex; // same texture instance — animating its uOffset below drives both at once
@@ -96,7 +100,7 @@ export class SkyBuilder {
     // means it reads as a genuine bright light source rather than
     // something that could itself fall into shadow or dim with the
     // scene's own ambient/sun intensity.
-    this.sunMesh = MeshBuilder.CreatePlane("sunDisc", { size: 34 }, scene);
+    this.sunMesh = MeshBuilder.CreatePlane("sunDisc", { size: 280 }, scene);
     this.sunMesh.billboardMode = Mesh.BILLBOARDMODE_ALL;
     this.sunMesh.isPickable = false;
     this.sunMesh.infiniteDistance = true;
@@ -131,7 +135,7 @@ export class SkyBuilder {
     // infiniteDistance alone, the same way the cloud layer below
     // re-centers each frame rather than assuming that flag alone keeps
     // a flat mesh correctly positioned as the player roams.
-    const sunOffset = sunDirection.scale(-300);
+    const sunOffset = sunDirection.scale(-2500); // behind the mountains, not in front of them
     this.sunMesh.position.set(playerX + sunOffset.x, sunOffset.y, playerZ + sunOffset.z);
     // Below the horizon (night) — fade the disc out rather than showing
     // a sun glowing through the ground.

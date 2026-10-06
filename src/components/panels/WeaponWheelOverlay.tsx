@@ -6,6 +6,8 @@ import { LevelBadge, XpBar } from "../hud/LevelBits";
 
 interface WeaponWheelOverlayProps {
   equipped: WeaponKind | null;
+  /** Weapons the player has; the others show locked. */
+  owned: WeaponKind[];
   onSelect: (weapon: WeaponKind) => void;
   onUnequip: () => void;
   onClose: () => void;
@@ -28,7 +30,7 @@ const SLOTS: WheelSlot[] = [
 
 const RADIUS_PX = 110;
 
-export function WeaponWheelOverlay({ equipped, onSelect, onUnequip, onClose, weapons }: WeaponWheelOverlayProps) {
+export function WeaponWheelOverlay({ equipped, owned, onSelect, onUnequip, onClose, weapons }: WeaponWheelOverlayProps) {
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
@@ -64,7 +66,8 @@ export function WeaponWheelOverlay({ equipped, onSelect, onUnequip, onClose, wea
           const x = RADIUS_PX + Math.cos(angle) * RADIUS_PX + 50;
           const y = RADIUS_PX + Math.sin(angle) * RADIUS_PX + 50;
           const isEquipped = equipped === slot.kind;
-          const progress = weapons?.[slot.kind];
+          const isOwned = owned.includes(slot.kind);
+          const progress = isOwned ? weapons?.[slot.kind] : undefined;
           return (
             <button
               key={slot.kind}
@@ -79,8 +82,8 @@ export function WeaponWheelOverlay({ equipped, onSelect, onUnequip, onClose, wea
               }`}
               style={{ left: x, top: y }}
             >
-              <span className="text-2xl leading-none">{slot.icon}</span>
-              <span className="text-[10px] font-medium">{slot.label}</span>
+              <span className={`text-2xl leading-none ${isOwned ? "" : "opacity-30 grayscale"}`}>{slot.icon}</span>
+              <span className="text-[10px] font-medium">{isOwned ? slot.label : `🔒 ${slot.label}`}</span>
               <span className="text-[9px] text-stone-400">{slot.key}</span>
               {progress && <XpBar xp={progress.xp} xpToNext={progress.xpToNext} tone="weapon" className="w-12" />}
               {progress && (

@@ -1,4 +1,5 @@
 // src/babylon/combat/CombatConfig.ts
+import type { VoiceId } from "../../content/dialogue/barks";
 import type { CharacterSkinId } from "../characters/SkeletalCharacter";
 import type { WeaponKind } from "../../types";
 // Every combat balance value lives here, nowhere else — section 41/36 of
@@ -12,6 +13,8 @@ export interface EnemyArchetypeConfig {
   displayName: string;
   /** Which CharacterSkinId (see SkeletalCharacter.ts) this archetype's model uses. Real bug fixed here: every enemy previously had no skinId passed at all when its character was created, silently defaulting to "ninja" — the player's own model — meaning every enemy and the player shared not just a model but, since instantiateModelsToScene is called with cloneMaterials=false, the exact same underlying material objects. Disposing one enemy's character (its own SkeletalCharacter.dispose()) was disposing state genuinely shared with the player's own materials, which is what actually made the player's own model go flat gray after a couple of kills. */
   skin: CharacterSkinId;
+  /** Which set of speech-bubble lines it shouts (content/dialogue/barks.ts) — debtCollector if not set. */
+  voice?: VoiceId;
   /** Scales the level-based max health (endurance x 8) — this archetype's own toughness. */
   healthMultiplier: number;
   /** Scales the level-based raw damage (strength) — how hard this archetype hits. */
@@ -59,6 +62,7 @@ const ENEMY_ARCHETYPES: EnemyArchetypeConfig[] = [
     id: "leonard",
     displayName: "Leonard",
     skin: "leonard", // was "brute"/warriorFemale — id now matches the character it uses, per request
+    voice: "brute",
     healthMultiplier: 1.5,
     damageMultiplier: 1.2,
     meleeRadius: 2.2,
@@ -218,7 +222,7 @@ export const COMBAT_CONFIG = {
   spawn: {
     /** How often (seconds) the population manager reconsiders spawning. */
     tickInterval: 3,
-    /** Outside-city ring this spawns within — reuses CITY_RADIUS/MOUNTAIN_BASE from TerrainBuilder rather than a second, competing boundary definition (spec section 30). */
+    /** Outside-city ring this spawns within — reuses CITY_RADIUS from TerrainBuilder rather than a second, competing boundary definition (spec section 30). */
   },
   damageNumbers: {
     displayDurationBase: 1.1,

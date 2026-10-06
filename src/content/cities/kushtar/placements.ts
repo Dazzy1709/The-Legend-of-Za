@@ -39,13 +39,16 @@ export const SAFE_HOUSES: SafeHousePlacement[] = [
   },
 ];
 
+/** Where Snoop waits at the market (cutscenes frame him here too). */
+export const SNOOP_SPOT: WorldPosition = { x: -11.5, z: 9 };
+
 export const NPC_PLACEMENTS: NPCPlacement[] = [
   {
     id: "snoop",
     name: "Snoop Cordozar",
     title: "Guard's Son",
     dialogueTreeId: "snoop-intro",
-    position: { x: -14, z: 13 },
+    position: SNOOP_SPOT, // out in front of the market stall, facing the plaza — not inside it
     colorHex: "#38bdf8",
     skin: "men",
   },
@@ -135,6 +138,17 @@ export const NPC_PLACEMENTS: NPCPlacement[] = [
     colorHex: "#34d399",
     skin: "seller",
   },
+  {
+    // The Weapons Store's door (see the "weapons-store" building) — handled
+    // like the healing shop: GameScreen opens the store instead of a dialogue.
+    id: "weapons-store",
+    name: "Weapons Store",
+    title: "Arms & Armour",
+    dialogueTreeId: "weapons-store-unused",
+    position: { x: 88, z: 31.4 },
+    colorHex: "#b91c1c",
+    skin: "warriorMale",
+  },
 ];
 
 // Landmarks only — CityBuilder fills in the rest of the city grid, streets,
@@ -206,9 +220,22 @@ export const BUILDINGS: BuildingPlacement[] = [
     archetype: "shop",
     facingYaw: Math.PI,
   },
+  {
+    // The Weapons Store, one block east of the healing shop on the same
+    // Handelsviertel street, door toward it (built by CityBuilder.buildWeaponsStore).
+    id: "weapons-store",
+    position: { x: 88, z: 39 },
+    width: 12,
+    depth: 10,
+    height: 7,
+    colorHex: "#57534e",
+    archetype: "shop",
+    facingYaw: Math.PI,
+  },
   SAFE_HOUSE_BUILDING,
   { id: "cordozar-home", position: { x: -80, z: 30 }, width: 6, depth: 5.5, height: 4, colorHex: "#6b7a4e" },
-  { id: "quiet-house", position: { x: 80, z: 30 }, width: 5.5, depth: 5.5, height: 4, colorHex: "#5c6b46" },
+  { id: "quiet-house", position: { x: 80, z: 62 }, // was z: 30 — moved a block north, it stood in front of the Weapons Store
+    width: 5.5, depth: 5.5, height: 4, colorHex: "#5c6b46" },
   { id: "lake-cottage", position: { x: 14, z: -82 }, width: 5.5, depth: 5, height: 3.6, colorHex: "#7a6a52" },
 ];
 

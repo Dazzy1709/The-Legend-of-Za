@@ -44,6 +44,9 @@ import {
   AnimationGroupMaskMode,
   AnimatorAvatar,
   AssetContainer,
+  type BaseTexture,
+  type Node,
+  PBRMaterial,
   Quaternion,
   Scene,
   SceneLoader,
@@ -62,6 +65,8 @@ import {
 // headless tests explicitly imported this already, which is exactly why
 // that testing never caught its absence from the real app's own source.
 import { GLTFFileLoader, GLTFLoaderAnimationStartMode } from "@babylonjs/loaders/glTF";
+import { LoadingTracker } from "../core/LoadingTracker";
+import { QUALITY } from "../core/Quality";
 import { HUMANOID_ANIMATIONS_FOLDER } from "../../content/assetPaths";
 import { HUMANOID_ANIMATION_FILES, type HumanoidAnimation as NinjaAnimation } from "../../content/animations/humanoidAnimations";
 import { CHARACTER_SKINS, type CharacterSkinDef, type CharacterSkinId } from "../../content/characters/skins";
@@ -135,7 +140,12 @@ class NinjaAssets {
     let promise = sceneCache.get(skinId);
     if (!promise) {
       const skin = CHARACTER_SKINS[skinId];
-      promise = SceneLoader.LoadAssetContainerAsync(skin.baseUrl, skin.modelFile, scene);
+      promise = LoadingTracker.for(scene)
+        .track((onProgress) => SceneLoader.LoadAssetContainerAsync(skin.baseUrl, skin.modelFile, scene, onProgress))
+        .then((container) => {
+          if (!QUALITY.characterDetailMaps) dropDetailMaps(container);
+          return container;
+        });
       sceneCache.set(skinId, promise);
     }
     return promise;
@@ -149,15 +159,38 @@ class NinjaAssets {
     }
     let promise = sceneCache.get(name);
     if (!promise) {
-      promise = SceneLoader.ImportMeshAsync("", MODEL_BASE_URL, HUMANOID_ANIMATION_FILES[name], scene).then((result) => {
-        // Belt and braces alongside animationStartMode=NONE above: the
-        // source skeleton must stay at rest for retargeting to be right.
-        result.animationGroups.forEach((g) => g.stop());
-        return result.animationGroups[0];
-      });
+      promise = LoadingTracker.for(scene)
+        .track((onProgress) => SceneLoader.ImportMeshAsync("", MODEL_BASE_URL, HUMANOID_ANIMATION_FILES[name], scene, onProgress))
+        .then((result) => {
+          // Belt and braces alongside animationStartMode=NONE above: the
+          // source skeleton must stay at rest for retargeting to be right.
+          result.animationGroups.forEach((g) => g.stop());
+          return result.animationGroups[0];
+        });
       sceneCache.set(name, promise);
     }
     return promise;
+  }
+}
+
+/**
+ * Phones: keeps only a skin's colour maps, freeing its normal and
+ * metal/roughness maps (2048px each, so most of a character's memory) —
+ * see Quality.ts.
+ */
+function dropDetailMaps(container: AssetContainer) {
+  const dropped = new Set<BaseTexture>();
+  for (const material of container.materials) {
+    if (!(material instanceof PBRMaterial)) continue;
+    for (const texture of [material.bumpTexture, material.metallicTexture]) if (texture) dropped.add(texture);
+    // glTF's metallic factor (default 1) multiplies the map — without the map it would turn everything to dark metal.
+    if (material.metallicTexture) material.metallic = 0;
+    material.bumpTexture = null;
+    material.metallicTexture = null;
+  }
+  for (const texture of dropped) {
+    container.textures.splice(container.textures.indexOf(texture), 1);
+    texture.dispose();
   }
 }
 
@@ -227,6 +260,18 @@ export class SkeletalCharacter {
   private readonly rootBoneName: string;
   private readonly groundBoneName: string;
   private readonly animations = new Map<NinjaAnimation, AnimationGroup>();
+  private readonly skinId: CharacterSkinId;
+  /** What this instance's node names start with (instantiateModelsToScene's name prefix). */
+  private readonly namePrefix: string;
+  /**
+   * Retargeted clips shared by every instance of the same skin (same
+   * skeleton, same scale): the first instance retargets a clip, and the
+   * rest get a group pointing at their own bones but reusing its keyframes.
+   * Retargeting copies every keyframe, so without this each crowd member
+   * held its own copy of every clip — hundreds of MB, enough to crash
+   * Safari on a phone.
+   */
+  private static sharedClips = new WeakMap<Scene, Map<string, { group: AnimationGroup; prefix: string }>>();
   private current: AnimationGroup | null = null;
   private playToken = 0;
   /** Node names under given root bones, cached per root-bone list — see bonesUnder(). */
@@ -242,9 +287,12 @@ export class SkeletalCharacter {
     skeleton: Skeleton,
     mesh: AbstractMesh,
     avatar: AnimatorAvatar,
-    skinId: CharacterSkinId
+    skinId: CharacterSkinId,
+    namePrefix: string
   ) {
     this.scene = scene;
+    this.skinId = skinId;
+    this.namePrefix = namePrefix;
     this.root = root;
     this.skeleton = skeleton;
     this.mesh = mesh;
@@ -284,6 +332,8 @@ export class SkeletalCharacter {
     // property object, which is what actually needed to be independent
     // per character.
     const instantiated = container.instantiateModelsToScene((n) => `${name}_${n}`, true);
+    // The model's own built-in clips are never played (the shared humanoid library is) — drop this instance's copies.
+    instantiated.animationGroups.forEach((g) => g.dispose());
     const root = instantiated.rootNodes[0] as TransformNode;
     root.scaling.scaleInPlace(CHARACTER_SKINS[skinId].importScale);
     // Hidden until animations are ready and the first one has actually
@@ -313,7 +363,7 @@ export class SkeletalCharacter {
     // materials/textures at all.
     const avatar = new AnimatorAvatar(name, root, false);
 
-    const character = new SkeletalCharacter(scene, root, skeleton, mesh, avatar, skinId);
+    const character = new SkeletalCharacter(scene, root, skeleton, mesh, avatar, skinId, `${name}_`);
     // Each clip's own retargeting is isolated — a bone-name mismatch on
     // one specific clip for one specific skin (plausible: different
     // downloaded models don't all necessarily share identical skeleton
@@ -342,11 +392,48 @@ export class SkeletalCharacter {
     return character;
   }
 
+  /** Keeps a copy of a freshly retargeted clip for later instances of this skin (see sharedClips). It isn't played itself. */
+  private shareClip(name: NinjaAnimation, retargeted: AnimationGroup) {
+    let clips = SkeletalCharacter.sharedClips.get(this.scene);
+    if (!clips) {
+      clips = new Map();
+      SkeletalCharacter.sharedClips.set(this.scene, clips);
+    }
+    const key = `${this.skinId}|${name}`;
+    if (clips.has(key)) return;
+    // Its own group (sharing the keyframes), so this instance disposing its clips later doesn't empty it.
+    const template = retargeted.clone(`${key}_shared`, (target) => target);
+    template.stop();
+    clips.set(key, { group: template, prefix: this.namePrefix });
+  }
+
+  /** Gives this instance a clip another instance of its skin already retargeted, pointed at its own bones. False if there isn't one yet (or it doesn't fit). */
+  private useSharedClip(name: NinjaAnimation): boolean {
+    const shared = SkeletalCharacter.sharedClips.get(this.scene)?.get(`${this.skinId}|${name}`);
+    if (!shared) return false;
+    const ownNodes = new Map<string, Node>();
+    for (const node of this.root.getDescendants(false)) ownNodes.set(node.name, node);
+    const targets: Node[] = [];
+    for (const targeted of shared.group.targetedAnimations) {
+      const targetName: string = targeted.target?.name ?? "";
+      const own = targetName.startsWith(shared.prefix) ? ownNodes.get(this.namePrefix + targetName.slice(shared.prefix.length)) : undefined;
+      if (!own) return false;
+      targets.push(own);
+    }
+    let i = 0;
+    const group = shared.group.clone(`${name}_retargeted`, () => targets[i++]); // cloneAnimations false: the keyframes are shared
+    group.stop();
+    this.animations.set(name, group);
+    return true;
+  }
+
   /** Loads + retargets one clip onto this instance's own skeleton, if not already loaded. Safe to call repeatedly. */
   async loadAnimation(name: NinjaAnimation): Promise<void> {
     if (this.animations.has(name)) return;
     const source = await NinjaAssets.getAnimationSource(this.scene, name);
     if (this.scene.isDisposed) return; // the character itself is about to be garbage; no point retargeting onto a dead scene
+    if (this.animations.has(name)) return; // loaded meanwhile by another call
+    if (this.useSharedClip(name)) return;
 
     const retargeted = this.avatar.retargetAnimationGroup(source, {
       animationGroupName: `${name}_retargeted`,
@@ -395,6 +482,7 @@ export class SkeletalCharacter {
     }
     retargeted.stop();
     this.animations.set(name, retargeted);
+    this.shareClip(name, retargeted);
   }
 
   /**

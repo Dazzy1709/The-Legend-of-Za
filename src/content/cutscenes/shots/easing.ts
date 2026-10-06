@@ -1,4 +1,4 @@
-// src/content/cutscenes/easing.ts
+// src/content/cutscenes/shots/easing.ts
 // Easing curves for cutscene camera moves. Every one maps 0 -> 0 and 1 -> 1.
 
 export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;

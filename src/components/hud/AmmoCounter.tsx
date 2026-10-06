@@ -28,7 +28,7 @@ export function AmmoCounter({ engineRef }: { engineRef: React.MutableRefObject<G
   if (!ammo) return null;
   const empty = ammo.inMagazine === 0;
   return (
-    <div className="pointer-events-none fixed bottom-[184px] right-4 z-10">
+    <div className="pointer-events-none fixed bottom-[184px] right-4 z-10 compact:bottom-[9rem]! compact:right-2!">
       <div className="rounded-md border border-amber-900/50 bg-stone-950/85 px-2.5 py-1 text-center font-mono text-sm tabular-nums shadow-lg">
         <span className={empty ? "text-rose-400" : "text-stone-100"}>{ammo.inMagazine}</span>
         <span className="text-stone-500"> / {ammo.magazineSize}</span>

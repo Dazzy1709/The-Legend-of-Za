@@ -11,7 +11,7 @@
 // the atlas, at CLAMP wrap, never tiled.
 
 import { Color3, Matrix, Mesh, PBRMaterial, Quaternion, Scene, Texture, Vector3, VertexData } from "@babylonjs/core";
-import { sampleTerrainHeight } from "./TerrainBuilder";
+import { fbm, sampleTerrainHeight, smoothstep } from "./TerrainBuilder";
 import { textureSetFolder } from "../../content/assetPaths";
 
 function seedFor(x: number, z: number): number {
@@ -87,8 +87,10 @@ function buildCardMesh(scene: Scene, variant: AtlasVariant, name: string): Mesh 
     0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2,
     4, 5, 6, 4, 6, 7, 4, 6, 5, 4, 7, 6,
   ];
-  const normals: number[] = [];
-  VertexData.ComputeNormals(positions, indices, normals);
+  // Straight up, not computed: both windings share these vertices, so
+  // computed normals cancel out to ~zero and the grass lights pitch black.
+  // Up-facing normals also light a tuft like the ground it stands on.
+  const normals = positions.map((_, i) => (i % 3 === 1 ? 1 : 0));
 
   const mesh = new Mesh(name, scene);
   const vertexData = new VertexData();
@@ -104,13 +106,12 @@ function createGrassMaterial(scene: Scene): PBRMaterial {
   const baseUrl = textureSetFolder("grass_medium_01");
   const albedo = new Texture(baseUrl + "grass_medium_01_diff_1k.jpg", scene);
   const opacity = new Texture(baseUrl + "grass_medium_01_alpha_1k.png", scene);
-  const normal = new Texture(baseUrl + "grass_medium_01_nor_gl_1k.png", scene);
   const roughness = new Texture(baseUrl + "grass_medium_01_rough_1k.png", scene);
   // CLAMP, not the WRAP_ADDRESSMODE + tiling every other PBR material in
   // this project uses (see PbrTextureSet.ts) — this is a fixed-crop
   // atlas sample per card, not a tiled surface; wrapping would bleed in
   // neighboring atlas cells at the crop's own edges.
-  for (const tex of [albedo, opacity, normal, roughness]) {
+  for (const tex of [albedo, opacity, roughness]) {
     tex.wrapU = Texture.CLAMP_ADDRESSMODE;
     tex.wrapV = Texture.CLAMP_ADDRESSMODE;
   }
@@ -137,7 +138,7 @@ function createGrassMaterial(scene: Scene): PBRMaterial {
   // is what this file actually encodes the shape in.
   opacity.getAlphaFromRGB = true;
   mat.opacityTexture = opacity;
-  mat.bumpTexture = normal;
+  // No normal map: the cards use flat up-facing normals (see buildCardMesh).
   mat.metallicTexture = roughness; // same green-channel-roughness convention as PbrTextureSet.ts
   mat.useRoughnessFromMetallicTextureGreen = true;
   mat.metallic = 0;
@@ -279,5 +280,91 @@ export class GrassBuilder {
       }
     });
     return spots;
+  }
+}
+/** Meadow tufts sit on a world grid this many metres apart (each jittered within its cell). */
+const MEADOW_SPACING = 1.7;
+/** Tufts are drawn within this radius of the player. */
+const MEADOW_RADIUS = 75;
+/** How far the player moves before the meadow around them is rebuilt. */
+const MEADOW_REBUILD_DISTANCE = 14;
+
+/**
+ * Grass across the wilds outside the walls. That's far too much ground to
+ * place every tuft up front, so only the tufts around the player exist:
+ * they sit on a fixed world grid (same spots every time — nothing shifts
+ * as you walk) and the set is rebuilt each time the player has moved a
+ * little way. Thick in meadows, thin or bare in between, none on steep
+ * slopes, high ground or inside `innerRadius` (the city).
+ */
+export class MeadowGrass {
+  private meshes: Mesh[];
+  private center: { x: number; z: number } | null = null;
+
+  constructor(scene: Scene, private innerRadius: number, private maxHeight = 60) {
+    const material = createGrassMaterial(scene);
+    this.meshes = ATLAS_VARIANTS.map((v, i) => {
+      const mesh = buildCardMesh(scene, v, `meadow-grass-${i}`);
+      mesh.material = material;
+      mesh.isPickable = false;
+      mesh.alwaysSelectAsActiveMesh = true; // the instances always surround the player
+      return mesh;
+    });
+  }
+
+  /** Call once per frame. */
+  update(playerPos: Vector3) {
+    if (this.center && Math.hypot(playerPos.x - this.center.x, playerPos.z - this.center.z) < MEADOW_REBUILD_DISTANCE) return;
+    this.center = { x: playerPos.x, z: playerPos.z };
+    this.rebuild(playerPos.x, playerPos.z);
+  }
+
+  private rebuild(px: number, pz: number) {
+    const matrices: number[][] = this.meshes.map(() => []);
+    // Deep inside the city there's no meadow in reach.
+    if (Math.hypot(px, pz) + MEADOW_RADIUS < this.innerRadius) {
+      this.meshes.forEach((mesh) => mesh.setEnabled(false));
+      return;
+    }
+    const tmp = new Matrix();
+    const scaleV = new Vector3();
+    const posV = new Vector3();
+    const minI = Math.floor((px - MEADOW_RADIUS) / MEADOW_SPACING);
+    const maxI = Math.ceil((px + MEADOW_RADIUS) / MEADOW_SPACING);
+    const minJ = Math.floor((pz - MEADOW_RADIUS) / MEADOW_SPACING);
+    const maxJ = Math.ceil((pz + MEADOW_RADIUS) / MEADOW_SPACING);
+    for (let i = minI; i <= maxI; i++) {
+      for (let j = minJ; j <= maxJ; j++) {
+        const x = (i + seedFor(i * 1.3, j * 7.9)) * MEADOW_SPACING;
+        const z = (j + seedFor(i * 5.1, j * 2.3)) * MEADOW_SPACING;
+        if (Math.hypot(x - px, z - pz) > MEADOW_RADIUS) continue;
+        const fromCentre = Math.hypot(x, z);
+        if (fromCentre < this.innerRadius) continue;
+        // Meadows: dense where the noise is high, sparse elsewhere.
+        const meadow = fbm(x * 0.025 + 13, z * 0.025 - 7, 3);
+        const keep = smoothstep(0.3, 0.55, meadow) * 0.9 + 0.1;
+        if (seedFor(x * 3.7, z * 9.1) > keep) continue;
+        const y = sampleTerrainHeight(x, z);
+        if (y > this.maxHeight) continue;
+        const slope = Math.abs(sampleTerrainHeight(x + 1, z) - y) + Math.abs(sampleTerrainHeight(x, z + 1) - y);
+        if (slope > 0.9) continue;
+        const variant = Math.floor(seedFor(x, z) * this.meshes.length) % this.meshes.length;
+        const scale = (0.85 + seedFor(x - 6.3, z + 8.9) * 0.7) * (0.8 + meadow * 0.6);
+        scaleV.set(scale, scale, scale);
+        posV.set(x, y - 0.02, z);
+        Matrix.ComposeToRef(scaleV, Quaternion.RotationAxis(Vector3.Up(), seedFor(x + 4.1, z - 2.7) * Math.PI * 2), posV, tmp);
+        const out = matrices[variant];
+        for (let k = 0; k < 16; k++) out.push(tmp.m[k]);
+      }
+    }
+    this.meshes.forEach((mesh, i) => {
+      // No tufts: switch the card off (without instances it would draw once, at the origin).
+      mesh.setEnabled(matrices[i].length > 0);
+      if (matrices[i].length === 0) return;
+      mesh.thinInstanceSetBuffer("matrix", new Float32Array(matrices[i]), 16, false);
+      // Bounds around the tufts, not the card at the origin — the lights a
+      // mesh gets are picked by where it is, and the origin is the plaza.
+      mesh.thinInstanceRefreshBoundingInfo();
+    });
   }
 }

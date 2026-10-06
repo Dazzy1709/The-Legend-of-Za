@@ -91,8 +91,9 @@ export function InventoryPanel({ player, onUseStrain, onMoveItem, onClose }: Inv
   };
 
   return (
-    <div className="fixed inset-0 z-20 bg-black/60 flex items-end sm:items-center justify-center p-3 sm:p-6">
-      <div className="w-full max-w-lg bg-stone-800 border-4 border-stone-950 rounded-md shadow-2xl overflow-hidden" style={{ fontFamily: "monospace" }}>
+    <div className="fixed inset-0 z-20 bg-black/60 flex items-end sm:items-center justify-center p-3 sm:p-6 short:p-2">
+      {/* Never taller than the screen — on a sideways phone the slots scroll, in a wider grid. */}
+      <div className="flex max-h-full w-full max-w-lg flex-col bg-stone-800 border-4 border-stone-950 rounded-md shadow-2xl overflow-hidden short:max-w-xl" style={{ fontFamily: "monospace" }}>
         <div className="flex items-center justify-between px-4 py-2.5 bg-stone-900 border-b-4 border-stone-950">
           <span className="text-stone-200 text-sm tracking-wide">Satchel</span>
           <button onClick={onClose} className="text-stone-400 hover:text-stone-100 text-sm">
@@ -100,11 +101,11 @@ export function InventoryPanel({ player, onUseStrain, onMoveItem, onClose }: Inv
           </button>
         </div>
 
-        <p className="px-4 pt-3 text-[11px] text-stone-400">
+        <p className="px-4 pt-3 text-[11px] text-stone-400 short:pt-2">
           Drag items to rearrange — the first 3 slots also show on the side dock. Click an item to use it.
         </p>
 
-        <div className="p-4 grid grid-cols-6 gap-1.5">
+        <div className="grid min-h-0 grid-cols-6 gap-1.5 overflow-y-auto p-4 short:grid-cols-8 short:p-3">
           {Array.from({ length: SLOT_COUNT }).map((_, index) => {
             const entry = player.inventory[index];
             const strain = entry ? STRAINS[entry.strainId] : undefined;

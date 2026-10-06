@@ -1,10 +1,16 @@
 // src/babylon/combat/EnemyManager.ts
 import { Scene, ShadowGenerator, Vector3 } from "@babylonjs/core";
+import { QUALITY, scaledCount } from "../core/Quality";
 import { Enemy } from "./Enemy";
 import { COMBAT_CONFIG, type EnemyArchetypeConfig } from "./CombatConfig";
 import { CombatManager, type Combatant } from "./CombatManager";
-import { CITY_RADIUS, MOUNTAIN_BASE } from "../world/TerrainBuilder";
+import { CITY_RADIUS } from "../world/TerrainBuilder";
+import { ENEMY_LEVEL_ABOVE, MAX_CHARACTER_LEVEL } from "../progression/Progression";
+
+/** Enemies roam the belt of wilds just outside the city, out to this far from the walls' plateau. */
+const SPAWN_BELT_WIDTH = 240;
 import { WALL_RADIUS } from "../world/CityBuilder";
+import type { SpeechBubbles } from "../speech/SpeechBubbles";
 
 const NIGHT_BRIGHTNESS_THRESHOLD = 0.15;
 
@@ -40,15 +46,19 @@ export class EnemyManager {
   private enemies: Enemy[] = [];
   private spawnTickTimer = 0;
   private wasNight = false;
-  /** Level every enemy is at — the player's level + 3, kept in sync by GameEngine via setEnemyLevel. */
-  private enemyLevel = 1;
+  /** The player's level, kept in sync by GameEngine via setPlayerLevel. */
+  private playerLevel = 1;
+  /** How many levels above the player each enemy is — rolled once at spawn (ENEMY_LEVEL_ABOVE). */
+  private levelsAbove = new WeakMap<Enemy, number>();
 
   constructor(
     private scene: Scene,
     private combat: CombatManager,
     private getPlayerPosition: () => Vector3,
     private playerCombatant: Combatant,
-    private shadows?: ShadowGenerator
+    private shadows?: ShadowGenerator,
+    /** Speech bubbles for enemy barks. */
+    private speech?: SpeechBubbles
   ) {}
 
   update(dt: number, brightness: number) {
@@ -146,12 +156,15 @@ export class EnemyManager {
   private trySpawn(playerPos: Vector3) {
     for (const config of COMBAT_CONFIG.enemyArchetypes) {
       const currentCount = this.enemies.filter((e) => e.config.id === config.id && !e.isDead()).length;
-      if (currentCount >= config.maxPopulation) continue;
+      if (currentCount >= Math.max(1, scaledCount(config.maxPopulation, QUALITY.enemyScale))) continue; // fewer on phones — see Quality.ts
 
       const spot = this.pickSpawnSpot(playerPos, config);
       if (!spot) continue;
       const id = `${config.id}-${Date.now().toString(36)}-${Math.floor(Math.random() * 1000)}`;
-      this.enemies.push(new Enemy(this.scene, id, config, spot, this.enemyLevel, this.shadows));
+      const above = ENEMY_LEVEL_ABOVE.min + Math.floor(Math.random() * (ENEMY_LEVEL_ABOVE.max - ENEMY_LEVEL_ABOVE.min + 1));
+      const enemy = new Enemy(this.scene, id, config, spot, this.levelFor(above), this.shadows, this.speech);
+      this.levelsAbove.set(enemy, above);
+      this.enemies.push(enemy);
     }
   }
 
@@ -170,7 +183,7 @@ export class EnemyManager {
       // targeting bug, but zero enemies ever actually spawning during
       // ordinary in-city play.
       const angle = Math.random() * Math.PI * 2;
-      const ringDist = CITY_RADIUS + Math.random() * (MOUNTAIN_BASE - 6 - CITY_RADIUS);
+      const ringDist = CITY_RADIUS + 10 + Math.random() * SPAWN_BELT_WIDTH;
       const x = Math.sin(angle) * ringDist;
       const z = Math.cos(angle) * ringDist;
       const distFromPlayer = Math.hypot(x - playerPos.x, z - playerPos.z);
@@ -187,10 +200,14 @@ export class EnemyManager {
     return null;
   }
 
-  /** New level for every enemy (living ones are re-leveled in place, keeping their health fraction; new spawns start at it). */
-  setEnemyLevel(level: number) {
-    this.enemyLevel = level;
-    for (const enemy of this.enemies) enemy.setLevel(level);
+  /** The player's level changed: every enemy is re-leveled in place (keeping its health fraction and its 1-2 levels' lead). */
+  setPlayerLevel(level: number) {
+    this.playerLevel = level;
+    for (const enemy of this.enemies) enemy.setLevel(this.levelFor(this.levelsAbove.get(enemy) ?? ENEMY_LEVEL_ABOVE.min));
+  }
+
+  private levelFor(above: number): number {
+    return Math.min(MAX_CHARACTER_LEVEL, this.playerLevel + above);
   }
 
   getAllAsCombatants(): Combatant[] {

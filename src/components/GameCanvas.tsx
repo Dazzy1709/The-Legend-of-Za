@@ -3,9 +3,14 @@ import { useEffect, useRef } from "react";
 import { GameEngine } from "../babylon/core/GameEngine";
 import type { WeaponKind, WorldPosition } from "../types";
 import type { BridgeEvents } from "../babylon/core/EventBridge";
+import type { SaveGame } from "../../shared/save";
 import type { LevelUpEvent, ProgressionSnapshot, WeaponLevelUpEvent } from "../babylon/progression/Progression";
 
 interface GameCanvasProps {
+  /** The save to continue from (read once, when the engine starts; null: a new game). */
+  save: SaveGame | null;
+  /** Picking up after a page refresh: no opening shot (read once, like `save`). */
+  resume?: boolean;
   /** True while a dialogue, shop or weapon-wheel overlay is open — freezes player input. */
   paused: boolean;
   onNpcNearbyChange: (npcId: string | null) => void;
@@ -33,6 +38,8 @@ interface GameCanvasProps {
 }
 
 export function GameCanvas({
+  save,
+  resume = false,
   paused,
   onNpcNearbyChange,
   onNpcInteract,
@@ -114,7 +121,7 @@ export function GameCanvas({
 
   useEffect(() => {
     if (!canvasRef.current) return;
-    const engine = new GameEngine(canvasRef.current);
+    const engine = new GameEngine(canvasRef.current, { save, resume });
     engineRef.current = engine;
 
     const offNearby = engine.bridge.on("npcNearby", (id) => callbacksRef.current.onNpcNearbyChange(id));

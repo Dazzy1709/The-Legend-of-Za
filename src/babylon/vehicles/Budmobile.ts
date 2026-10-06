@@ -30,6 +30,7 @@ import {
   TransformNode,
   Vector3,
 } from "@babylonjs/core";
+import { LoadingTracker } from "../core/LoadingTracker";
 import type { HoverVehicleDef } from "../../content/vehicles/vehicles";
 import { VEHICLES_FOLDER } from "../../content/assetPaths";
 import type { WorldPosition } from "../../types";
@@ -81,7 +82,7 @@ const DISMOUNT_ARC = 0.5;
  */
 const TOE_BONES = ["mixamorig:LeftToeBase", "mixamorig:RightToeBase"];
 /** The top surface is a touch higher where the feet stand (either side of the centre line the seat is measured on). */
-const FEET_ON_TOP_LIFT = 0.11;
+const FEET_ON_TOP_LIFT = 0.05;
 /** The toe bone sits a little above the sole. */
 const FEET_ON_GROUND_LIFT = 0.04;
 /** Parts of each hop clip (share of its length) where the feet are planted: before take-off, after landing. */
@@ -112,7 +113,9 @@ function loadVehicleModel(scene: Scene, def: HoverVehicleDef): Promise<AssetCont
   }
   let promise = perScene.get(def.id);
   if (!promise) {
-    promise = SceneLoader.LoadAssetContainerAsync(`${VEHICLES_FOLDER}${def.folder}/`, def.modelFile, scene);
+    promise = LoadingTracker.for(scene).track((onProgress) =>
+      SceneLoader.LoadAssetContainerAsync(`${VEHICLES_FOLDER}${def.folder}/`, def.modelFile, scene, onProgress)
+    );
     perScene.set(def.id, promise);
   }
   return promise;
@@ -269,6 +272,22 @@ export class Budmobile {
     this.player.setFacingYaw(Math.atan2(landing.x - this.position.x, landing.z - this.position.z));
     this.player.setExternalControl(false);
     this.endRide();
+  }
+
+  /** Where it is and which way it faces — for saving. */
+  getPose(): { x: number; z: number; yaw: number } {
+    return { x: this.position.x, z: this.position.z, yaw: this.yaw };
+  }
+
+  /** Parks it at a saved spot. */
+  setPose(pose: { x: number; z: number; yaw: number }) {
+    if (this.state !== "parked") this.forceDismount();
+    this.position.set(pose.x, sampleTerrainHeight(pose.x, pose.z) + this.def.hoverHeight + PARKED_LIFT, pose.z);
+    this.velocity.setAll(0);
+    this.yaw = pose.yaw;
+    this.pitch = 0;
+    this.roll = 0;
+    this.applyTransform();
   }
 
   /** Back to its parking spot, parked — after the player dies and respawns. */

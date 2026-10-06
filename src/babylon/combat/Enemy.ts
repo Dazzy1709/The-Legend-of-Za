@@ -5,11 +5,25 @@ import { sampleTerrainHeight } from "../world/TerrainBuilder";
 import type { Combatant } from "./CombatManager";
 import type { EnemyArchetypeConfig } from "./CombatConfig";
 import { maxHealthForEndurance, sprintSecondsForCardio, statsForLevel, type Stats } from "../progression/Progression";
+import type { SpeechBubbles } from "../speech/SpeechBubbles";
+import { Barker } from "../speech/Barker";
 
 export type EnemyState = "idle" | "wander" | "alert" | "chase" | "attack" | "hitReaction" | "death" | "return";
 
-/** A brief turn toward the player before the chase starts — the "spotted you" point now plays on the arm while running (see setState), so the enemy never stands still to do it. */
-const ALERT_DURATION = 0.3;
+/**
+ * Spotting the player: the enemy stops, faces them and taunts (taps its
+ * wrist — "time's up") while a speech bubble says something, then runs
+ * at them. The taunt plays a little fast and is cut off here at most, so
+ * it reads as a beat, not a wait.
+ */
+const SPOT_TAUNT_SPEED = 1.25;
+const SPOT_TAUNT_MAX_SECONDS = 2.2;
+/** While chasing, a line every so often (seconds between tries, and the chance each try). */
+const CHASE_CHATTER_MIN = 4;
+const CHASE_CHATTER_MAX = 8;
+const CHASE_CHATTER_CHANCE = 0.65;
+/** Health bar, level badge and name label size (1 = the original size). */
+const HEALTH_BAR_SIZE = 1.4;
 /** Once the player has hit this enemy, it keeps chasing until the player is this far away (instead of its usual chaseRadius/returnRadius). */
 const PROVOKED_LEASH = 70;
 // "Make all enemies attack faster than they are attacking now" — plays
@@ -40,13 +54,6 @@ const DEATH_SOLID_DURATION = 10; // seconds a dead body stays fully visible befo
 // of relying on the clip alone to do it.
 const DEATH_FALL_DROP = 0.6; // units — how far the root drops from standing to lying height; this is a reasoned estimate, not something visually verified against the actual rendered result, so it may need retuning either direction
 const DEATH_FALL_DURATION = 1.6; // seconds — roughly the first 60% of the clip's own 2.633s, on the assumption the character hits the ground partway through rather than exactly at the clip's end
-const TAUNT_CHANCE = 0.3; // fraction of wander pauses that become a taunt/insult instead of a plain idle stand
-const TAUNT_DURATION_ESTIMATE = 2.5; // rough clip length — used only to know when it's safe to let "idle" resume overriding it
-
-function seedFor(x: number, z: number): number {
-  const s = Math.sin(x * 73.156 + z * 29.417) * 8231.643;
-  return s - Math.floor(s);
-}
 
 export class Enemy implements Combatant {
   readonly id: string;
@@ -69,7 +76,7 @@ export class Enemy implements Combatant {
   /** Grows with distance from the player so the bar stays readable far away (see update()). */
   private healthBarScale = 1;
   private currentHealth: number;
-  /** Character level — always the player's level + 3 (EnemyManager keeps it in sync). */
+  /** Character level — 1-2 above the player's (EnemyManager keeps it in sync). */
   private level: number;
   private stats: Stats;
   private maxHealth: number;
@@ -83,11 +90,12 @@ export class Enemy implements Combatant {
   private stateTimer = 0;
   /** Set when the player hits this enemy: it chases until the player is PROVOKED_LEASH away, ignoring its usual limits. */
   private provoked = false;
-  /** Play the "point" gesture when the next chase starts (only after spotting the player, not after every attack). */
-  private pointOnChase = false;
-  private timeSinceLastHit = 999; // starts high so an enemy can taunt as soon as it first enters chase, not just after 3s of chasing with no damage taken
-  private tauntCooldownTimer = 0;
-  private tauntingUntil = -1;
+  private timeSinceLastHit = 999;
+  /** Speech bubbles (null if the game has none). */
+  private readonly barker: Barker | null;
+  private chatterTimer = 0;
+  /** How long this enemy's spotting taunt lasts. */
+  private spotTauntSeconds = SPOT_TAUNT_MAX_SECONDS;
   private home: { x: number; z: number };
   private readonly spawnHome: { x: number; z: number };
   private chaseOrigin: { x: number; z: number };
@@ -100,8 +108,17 @@ export class Enemy implements Combatant {
   /** Set false only once the death collapse+fade has fully finished — EnemyManager uses this to know when it's safe to actually remove/despawn this instance (spec section 22, step 10). */
   despawnReady = false;
 
-  constructor(scene: Scene, id: string, config: EnemyArchetypeConfig, spawnPos: { x: number; z: number }, level: number, shadows?: ShadowGenerator) {
+  constructor(
+    scene: Scene,
+    id: string,
+    config: EnemyArchetypeConfig,
+    spawnPos: { x: number; z: number },
+    level: number,
+    shadows?: ShadowGenerator,
+    speech?: SpeechBubbles
+  ) {
     this.id = id;
+    this.barker = speech ? new Barker(speech, `enemy-${id}`, config.voice ?? "debtCollector", () => this.speechAnchor(), 0.12) : null;
     this.config = config;
     this.level = level;
     this.stats = statsForLevel(level);
@@ -194,9 +211,7 @@ export class Enemy implements Combatant {
         config.animations.death,
         config.animations.spawn,
         "taunt",
-        "insult",
         "headHit", // was missing entirely — this is why the animation "wasn't coming at all" for enemies even though the hitReaction state itself was transitioning correctly (stopping the attack): character.play("headHit", ...) was silently failing since the clip had never been loaded/retargeted for this character in the first place
-        "point",
       ] as NinjaAnimation[],
       config.skin // the actual fix for the gray-player bug — every enemy previously defaulted to skinId="ninja" here since nothing was ever passed
     )
@@ -266,9 +281,12 @@ export class Enemy implements Combatant {
     if (this.currentHealth <= 0) {
       this.setState("death"); // spec section 21: ATTACK -> DEATH pre-empts everything, including any in-progress hit reaction
     } else {
+      const unengaged = this.state === "idle" || this.state === "wander" || this.state === "return";
+      if (unengaged && !this.provoked) this.barker?.bark("provoked", 1, true);
+      else this.barker?.bark("hurt", 0.35);
       this.provoked = true;
       // Hit while not engaged (idle, walking home, spotting): go straight after the player.
-      if (this.hasPlayedHeadHit && (this.state === "idle" || this.state === "wander" || this.state === "return" || this.state === "alert")) {
+      if (this.hasPlayedHeadHit && (unengaged || this.state === "alert")) {
         this.chaseOrigin = { x: this.position.x, z: this.position.z };
         this.setState("chase");
       }
@@ -314,21 +332,21 @@ export class Enemy implements Combatant {
     // playing" and the enemy would freeze on the one-shot's last frame —
     // e.g. arms out at the end of a punch, which reads as a T-pose.
     this.lastAnimation = null;
-    // tauntingUntil is measured on stateTimer, which just restarted at 0 —
-    // a value left over from the previous state would read as "still
-    // taunting" for seconds and keep the enemy standing frozen in place.
-    this.tauntingUntil = -1;
     if (next === "attack") {
       this.attackDamageWindowOpen = false;
       this.attackHasHitPlayer = false;
+      this.barker?.bark("attacking", 0.3);
     }
-    if (next === "chase" && this.pointOnChase) {
-      // "Spotted you": point at the player with the right arm while
-      // already running at them (point.glb is 5.7s; 2.9x shows it in ~2s).
-      this.pointOnChase = false;
-      this.character?.playUpperBody("point", 2.9, 1800, undefined, ["mixamorig:RightShoulder"]);
+    if (next === "alert") {
+      // Spotted: the wrist-tapping taunt, and a line.
+      const clip = this.character?.getAnimationDuration("taunt") ?? 0;
+      this.spotTauntSeconds = clip > 0 ? Math.min(SPOT_TAUNT_MAX_SECONDS, clip / SPOT_TAUNT_SPEED) : 1;
+      this.character?.play("taunt", false, undefined, SPOT_TAUNT_SPEED);
+      this.barker?.bark("spotted", 1, true);
     }
+    if (next === "chase") this.chatterTimer = CHASE_CHATTER_MIN * 0.6;
     if (next === "death") {
+      this.barker?.bark("defeated", 0.5, true);
       this.deathStartY = this.position.y; // captured once, here, before updateDeath's own per-frame ease-down begins modifying this.position.y
       this.character?.play(this.config.animations.death as NinjaAnimation, false);
     }
@@ -471,7 +489,7 @@ export class Enemy implements Combatant {
     this.recoverStamina(dt);
     if (this.attackCooldownTimer > 0) this.attackCooldownTimer -= dt;
     this.timeSinceLastHit += dt;
-    if (this.tauntCooldownTimer > 0) this.tauntCooldownTimer -= dt;
+    this.barker?.update(dt);
 
     switch (this.state) {
       case "death":
@@ -481,15 +499,12 @@ export class Enemy implements Combatant {
       case "wander":
         this.updateWander(dt);
         if (this.tryAttack(playerPos, playerDistance)) break; // already inside its melee circle: strike right away
-        if (playerDistance <= this.config.detectionRadius) {
-          this.pointOnChase = true;
-          this.setState("alert");
-        }
+        if (playerDistance <= this.config.detectionRadius) this.setState("alert");
         break;
       case "alert":
         this.faceToward(playerPos, dt);
         if (this.tryAttack(playerPos, playerDistance)) break;
-        if (this.stateTimer >= ALERT_DURATION) {
+        if (this.stateTimer >= this.spotTauntSeconds) {
           this.chaseOrigin = { x: this.position.x, z: this.position.z };
           this.setState("chase");
         }
@@ -518,12 +533,12 @@ export class Enemy implements Combatant {
     }
     if (this.healthBarRoot?.isEnabled()) {
       // Constant-ish on-screen size: 1x up close, growing with distance (capped).
-      const scale = Math.min(4, Math.max(1, playerDistance / 10));
+      const scale = HEALTH_BAR_SIZE * Math.min(4, Math.max(1, playerDistance / 10));
       if (Math.abs(scale - this.healthBarScale) > 0.01) {
         this.healthBarScale = scale;
         this.healthBarRoot.scaling.setAll(scale);
       }
-      const barY = this.position.y + 2.2 + 0.1 * scale; // above the head, rising a little as the bar grows
+      const barY = this.position.y + 2.25 + 0.1 * scale; // above the head, rising a little as the bar grows
       this.healthBarRoot.position.set(this.position.x, barY, this.position.z);
     }
     // Far away (and not engaged): hidden and not animated — costs nothing until the player comes near.
@@ -550,33 +565,12 @@ export class Enemy implements Combatant {
   }
 
   private updateChase(dt: number, playerPos: Vector3, playerDistance: number) {
-    // "They should only taunt when they are in attack mode and haven't
-    // been attacked in 3 seconds" — chase is the actual "attack mode"
-    // this refers to (actively engaging the player, as opposed to
-    // idle/wander, which no longer taunts at all — see updateWander's
-    // own comment). Rolled periodically via tauntCooldownTimer rather
-    // than every frame, and skipped entirely while already mid-taunt
-    // (tauntingUntil) or while a real attack/hitReaction is what should
-    // actually be happening.
-    if (this.tauntCooldownTimer <= 0 && this.timeSinceLastHit >= 3 && this.stateTimer >= this.tauntingUntil) {
-      this.tauntCooldownTimer = 2.5 + seedFor(this.position.x + this.stateTimer, this.position.z) * 2; // next roll attempt in 2.5-4.5s, not every frame
-      const tauntSeed = seedFor(this.position.x + this.stateTimer * 3.1, this.position.z - this.stateTimer * 2.7);
-      if (tauntSeed < TAUNT_CHANCE && this.character) {
-        const clip = tauntSeed < TAUNT_CHANCE / 2 ? "taunt" : "insult";
-        this.tauntingUntil = this.stateTimer + TAUNT_DURATION_ESTIMATE;
-        this.character.play(clip, false, () => {
-          if (!this.disposed) this.lastAnimation = null; // forces the very next setAnimation() call to actually apply, rather than being skipped as a no-op because lastAnimation still says the same clip from before the taunt started
-        });
-      }
-    }
-    // Skip movement/re-triggering an animation entirely while a taunt
-    // is actively playing — without this, the setAnimation() calls
-    // further down would immediately override the taunt clip the very
-    // same frame it started. Still faces the player, since standing
-    // and taunting while looking away wouldn't read right.
-    if (this.stateTimer < this.tauntingUntil) {
-      this.faceToward(playerPos, dt);
-      return;
+    // Straight at the player — no stopping to taunt mid-chase — with a
+    // line shouted now and then.
+    this.chatterTimer -= dt;
+    if (this.chatterTimer <= 0) {
+      this.chatterTimer = CHASE_CHATTER_MIN + Math.random() * (CHASE_CHATTER_MAX - CHASE_CHATTER_MIN);
+      this.barker?.bark("chasing", CHASE_CHATTER_CHANCE);
     }
     const distFromOrigin = Math.hypot(this.position.x - this.chaseOrigin.x, this.position.z - this.chaseOrigin.z);
     // Provoked (the player hit it): only a very long way away ends the
@@ -586,6 +580,7 @@ export class Enemy implements Combatant {
       : playerDistance > this.config.chaseRadius || distFromOrigin > this.config.returnRadius;
     if (giveUp) {
       this.provoked = false;
+      this.barker?.bark("gaveUp", 0.8);
       this.setState("return");
       return;
     }
@@ -773,8 +768,15 @@ export class Enemy implements Combatant {
     return this.state === "chase" ? "running" : (this.config.animations.walk as NinjaAnimation);
   }
 
+  /** Where speech bubbles sit: just above the health bar (or the head, when the bar's hidden). */
+  private speechAnchor(): Vector3 {
+    const top = this.healthBarRoot?.isEnabled() ? 2.25 + 0.1 * this.healthBarScale + 0.42 * this.healthBarScale : 2.2;
+    return new Vector3(this.position.x, this.position.y + top, this.position.z);
+  }
+
   dispose() {
     this.disposed = true;
+    this.barker?.silence();
     this.character?.dispose();
     this.radiusMesh?.dispose();
     this.healthBarBg?.dispose();

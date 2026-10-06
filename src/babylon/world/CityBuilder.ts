@@ -65,6 +65,7 @@ import {
   Scene,
   ShadowGenerator,
   StandardMaterial,
+  TransformNode,
   Vector3,
   VertexBuffer,
   VertexData,
@@ -76,6 +77,7 @@ import {
   blendedPavementTint,
   DISTRICTS,
   type BuildingArchetype,
+  type DistrictDef,
   nearestDistrict,
   pickArchetype,
 } from "./Districts";
@@ -127,7 +129,7 @@ const DISTRICT_BUILDING_AVENUE_CLEARANCE = 20;
 
 const PLAZA_RADIUS = 15;
 export const PLAZA_CLEARANCE = 20; // no procedural buildings closer than this to center
-export const CITY_SPAN = 165; // was 200 — tightened along with ADEL_RING_OUTER_RADIUS so the whole city (not just the noble ring) reads as more compact
+export const CITY_SPAN = 205; // the capital's size — the wall, ring road and every district scale from this
 const GRID_HALF = Math.ceil(CITY_SPAN / CELL_SIZE);
 
 export const WALL_RADIUS = CITY_SPAN + 4;
@@ -151,6 +153,9 @@ export function streetHalfLength(offset: number): number {
 }
 const WALL_SEGMENTS = 52;
 const GATE_HALF_ANGLE = Math.PI / 24; // gap left open at each of the 4 cardinal gates
+const WALL_HEIGHT = 24; // a towering fortification (was 9.5)
+const GATE_TOWER_HEIGHT = 32;
+const GATE_TOWER_RADIUS = 4.2;
 
 const OUTSKIRTS_INNER = CITY_RADIUS + 6;
 const OUTSKIRTS_OUTER = 145;
@@ -159,7 +164,6 @@ const OUTSKIRTS_STEP = 17;
 const PARK_CHANCE = 0.03; // fraction of eligible cells that become a small green square instead of a building, in districts where PARK_CHANCE_OVERRIDE doesn't apply
 /** Per-district override of PARK_CHANCE — currently just Adelsviertel, scaled down since it should read as dense multi-story blocks, not a district dotted with green squares. Districts not listed here use the plain PARK_CHANCE above. */
 const PARK_CHANCE_OVERRIDE: Record<string, number> = { noble: 0.008 };
-const FARM_SIZE_SCALE = 1.55; // Bauernviertel's organic-cluster buildings scale up by this over the base 4.2-6.8/4.2-6.6 footprint range — "every house should be bigger than the average house, like a farm"
 
 // Along with its Bezirk, a building's height still nudges up slightly with
 // distance from the plaza — keeps the immediate market-stall-lined plaza
@@ -282,6 +286,82 @@ export interface CityLayout {
  * EXCEPT those in the avenue-frontage band (handled separately by
  * buildAvenueFrontage, so it isn't duplicated here).
  */
+/** Houses along one side of a block, and how they face. */
+interface BlockSide {
+  /** Unit vector pointing out of the block toward the street. */
+  out: { x: number; z: number };
+  /** Unit vector along the street. */
+  along: { x: number; z: number };
+  from: number;
+  to: number;
+  depth: number;
+}
+
+/**
+ * One block of terraced houses: a row along each of the block's four
+ * streets, fronts facing out. The north and south rows run the full
+ * width; the east and west rows fill the space between them, so the
+ * corners don't overlap. House widths vary, gaps between them are only a
+ * hand's breadth, and now and then a slot is left as a narrow passage.
+ */
+function terracedBlock(cx: number, cz: number, dist: number, district: DistrictDef, nextId: () => string): BuildingPlacement[] {
+  const out: BuildingPlacement[] = [];
+  const half = CELL_SIZE / 2 - STREET_HALF_WIDTH - MINOR_SIDEWALK_WIDTH - 0.3;
+  const farm = district.id === "farm";
+  const depthOf = (k: number) => (farm ? 6.4 : 5.0) + seedFor(cx + k * 7.7, cz - k * 3.1) * (farm ? 1.2 : 1.0);
+  const dN = depthOf(1);
+  const dS = depthOf(2);
+  const dE = depthOf(3);
+  const dW = depthOf(4);
+  const sides: BlockSide[] = [
+    { out: { x: 0, z: 1 }, along: { x: 1, z: 0 }, from: -half, to: half, depth: dN },
+    { out: { x: 0, z: -1 }, along: { x: -1, z: 0 }, from: -half, to: half, depth: dS },
+    { out: { x: 1, z: 0 }, along: { x: 0, z: -1 }, from: -half + dN + 0.2, to: half - dS - 0.2, depth: dE },
+    { out: { x: -1, z: 0 }, along: { x: 0, z: 1 }, from: -half + dS + 0.2, to: half - dN - 0.2, depth: dW },
+  ];
+  const minWidth = farm ? 5.2 : 3.6;
+  const widthRange = farm ? 2.2 : 2.0;
+  sides.forEach((side, si) => {
+    const facingYaw = Math.atan2(side.out.x, side.out.z);
+    let pos = side.from;
+    let k = 0;
+    while (side.to - pos >= minWidth) {
+      const r = seedFor(cx + si * 31.3 + k * 5.9, cz - si * 17.1 + k * 9.3);
+      const r2 = seedFor(cx - k * 13.1 + si, cz + k * 2.3 - si * 7);
+      let width = minWidth + r * widthRange;
+      // Don't leave a sliver at the end of the row — stretch the last house to fill it.
+      if (side.to - (pos + width) < minWidth) width = side.to - pos;
+      const gap = 0.12 + r2 * 0.3;
+      const passage = k > 0 && side.to - (pos + width) >= minWidth && r2 > 0.93; // a narrow alley now and then
+      if (!passage) {
+        const centre = pos + width / 2;
+        const inset = half - side.depth / 2;
+        // Round huts, churches and palaces don't stand in a terrace — those slots become plain houses.
+        const picked = pickArchetype(district, r);
+        const archetype = picked === "hut" || picked === "church" || picked === "royal" ? "village" : picked;
+        const height =
+          district.heightBase * 0.8 + ((r + r2) % 1) * district.heightRange + dist * DISTANCE_HEIGHT_BONUS_PER_UNIT;
+        out.push({
+          id: nextId(),
+          position: {
+            x: cx + side.out.x * inset + side.along.x * centre,
+            z: cz + side.out.z * inset + side.along.z * centre,
+          },
+          width: Math.max(2.5, width - gap),
+          depth: side.depth,
+          height: archetype === "barn" ? height * 1.1 : height,
+          colorHex: district.palette[Math.floor(r2 * district.palette.length) % district.palette.length],
+          archetype,
+          facingYaw,
+        });
+      }
+      pos += width;
+      k++;
+    }
+  });
+  return out;
+}
+
 export function generateCityLayout(): CityLayout {
   const buildings: BuildingPlacement[] = [];
   const parks: WorldPosition[] = [];
@@ -327,52 +407,11 @@ export function generateCityLayout(): CityLayout {
       groundPatches.push({ x: cx, z: cz, districtId: district.id });
 
       if (district.organic) {
-        // A small cluster of 1-3 smaller, irregularly placed/rotated
-        // buildings scattered within the lot instead of one centered
-        // building — a village huddle, not a city block. Cluster count
-        // and each member's offset/size/archetype are all seeded off the
-        // cell center, so the layout is stable across reloads.
-        const clusterCount = 1 + Math.floor(seedFor(cx + 5.1, cz + 5.1) * 3); // 1-3
-        for (let m = 0; m < clusterCount; m++) {
-          const mSeed = seedFor(cx + m * 17.3, cz + m * 23.9);
-          const mSeed2 = seedFor(cx + m * 41.1 + 7, cz + m * 31.7 - 4);
-          // Even tighter and bigger again (spread 0.12 -> 0.08, footprint
-          // 3.4-6.0 -> 4.2-6.8) — the outer Bezirke should read as
-          // buildings packed close together, not houses with visible
-          // grass gaps between them.
-          const offR = mSeed * lotSize * 0.08; // how far from the cell center this member sits
-          const offA = mSeed2 * Math.PI * 2;
-          const archetype = pickArchetype(district, mSeed);
-          const sizeScale = district.id === "farm" ? FARM_SIZE_SCALE : 1; // "every house should be bigger than the average house, like a farm"
-          const barnScale = archetype === "barn" ? 1.3 : 1; // barns bigger again than the district's already-scaled-up regular houses
-          const width = (4.2 + mSeed2 * 2.6) * sizeScale * barnScale; // smaller than the grid buildings — a cottage, not a block
-          const depth = (4.2 + mSeed * 2.4) * sizeScale * barnScale;
-          const height =
-            district.heightBase * 0.7 + ((mSeed + mSeed2) % 1) * district.heightRange * 0.8 +
-            dist * DISTANCE_HEIGHT_BONUS_PER_UNIT;
-          const colorHex = district.palette[Math.floor(mSeed * district.palette.length) % district.palette.length];
-          buildings.push({
-            id: `city-block-${id++}`,
-            position: { x: cx + Math.sin(offA) * offR, z: cz + Math.cos(offA) * offR },
-            width,
-            depth,
-            height,
-            colorHex,
-            archetype,
-            // Faces outward from the cell center along its own offset
-            // direction (offA), which — since streets run along every
-            // grid line, surrounding every cell on all sides — points it
-            // toward whichever street edge it actually sits closest to,
-            // not a single fixed direction every building in these three
-            // districts shared before. atan2(x,z) is this project's
-            // established facingYaw convention (0=+Z, clockwise toward
-            // +X), which offA already matches directly: the offset
-            // itself is (sin(offA)*offR, cos(offA)*offR), so its own
-            // angle in that convention is just offA, no conversion
-            // needed.
-            facingYaw: offA,
-          });
-        }
+        // The living quarters: each block is ringed with houses standing
+        // shoulder to shoulder along all four of its streets — fronts to
+        // the street, backs to a small shared yard in the middle — the
+        // packed, terraced look of an old capital's neighbourhoods.
+        buildings.push(...terracedBlock(cx, cz, dist, district, () => `city-block-${id++}`));
         continue;
       }
 
@@ -721,6 +760,7 @@ export class CityBuilder {
     layout.groundPatches.forEach((p) => this.buildGroundPatch(p.x, p.z, p.districtId));
     const all = [...landmarks, ...layout.buildings, ...buildAvenueFrontage(), ...generateOutskirtsHomesteads()];
     all.forEach((b) => this.buildOne(b));
+    this.flushBatches();
     layout.parks.forEach((p) => this.buildParkSquare(p));
   }
 
@@ -1142,16 +1182,32 @@ export class CityBuilder {
 
       const seg = MeshBuilder.CreateBox(
         `wall-${i}`,
-        { width: segLength, depth: WALL_DEPTH, height: 9.5 }, // was depth: 1.6, height: 5.5 — "bigger walls," a notably more imposing/fortified scale
+        { width: segLength, depth: WALL_DEPTH, height: WALL_HEIGHT },
         this.scene
       );
-      seg.position = new Vector3(x, groundY + 4.75, z); // was +2.75 — half of the new height, keeping the wall's base at ground level
+      // Sunk 2 below the ground so slopes never show a gap under it.
+      seg.position = new Vector3(x, groundY + WALL_HEIGHT / 2 - 2, z);
       seg.rotation.y = angle;
       seg.checkCollisions = true;
       seg.material = this.wallMaterial;
       seg.receiveShadows = true;
       applyWorldScaledUV(seg, WALL_TEXTURE_TILE_SIZE);
       this.shadows?.addShadowCaster(seg);
+    }
+    // A round tower either side of each gate.
+    for (let gate = 0; gate < 4; gate++) {
+      for (const side of [-1, 1]) {
+        const angle = gate * (Math.PI / 2) + side * (GATE_HALF_ANGLE + 0.012);
+        const x = Math.sin(angle) * WALL_RADIUS;
+        const z = Math.cos(angle) * WALL_RADIUS;
+        const tower = MeshBuilder.CreateCylinder(`gate-tower-${gate}-${side}`, { diameter: GATE_TOWER_RADIUS * 2, height: GATE_TOWER_HEIGHT, tessellation: 16 }, this.scene);
+        tower.position = new Vector3(x, sampleTerrainHeight(x, z) + GATE_TOWER_HEIGHT / 2 - 2, z);
+        tower.checkCollisions = true;
+        tower.material = this.wallMaterial;
+        tower.receiveShadows = true;
+        applyWorldScaledUV(tower, WALL_TEXTURE_TILE_SIZE);
+        this.shadows?.addShadowCaster(tower);
+      }
     }
   }
 
@@ -2393,6 +2449,121 @@ export class CityBuilder {
   }
 
   /**
+   * The Weapons Store, where the gun is bought: a squat, fortified
+   * dark-stone armoury with a battlemented flat roof, a heavy iron-bound
+   * door between two braziers, and a huge lit "WEAPONS STORE" billboard
+   * on posts above the roof, so it's spotted from far down the street.
+   * Door on local +Z, turned by facingYaw; the interaction spot is
+   * NPC_PLACEMENTS' "weapons-store" entry, just outside.
+   */
+  private buildWeaponsStore(b: BuildingPlacement) {
+    const groundY = sampleTerrainHeight(b.position.x, b.position.z);
+    const { width, depth, height } = b;
+    const foundationH = 0.4;
+    const ironMat = new StandardMaterial(`${b.id}-iron`, this.scene);
+    ironMat.diffuseColor = new Color3(0.16, 0.15, 0.15);
+    ironMat.specularColor = new Color3(0.25, 0.25, 0.25);
+    const fireMat = new StandardMaterial(`${b.id}-fire`, this.scene);
+    fireMat.diffuseColor = new Color3(1, 0.55, 0.15);
+    fireMat.emissiveColor = new Color3(1, 0.45, 0.1);
+    fireMat.disableLighting = true;
+
+    const parts: Mesh[] = [];
+    parts.push(this.foundationPart(width, depth, foundationH, b.id));
+    const wall = MeshBuilder.CreateBox(`${b.id}-wall`, { width, depth, height }, this.scene);
+    wall.position.y = foundationH + height / 2;
+    wall.material = this.wallMaterial; // the city wall's stone: it reads as an armoury
+    applyWorldScaledUV(wall, WALL_TEXTURE_TILE_SIZE);
+    parts.push(wall);
+    // Battlements round the flat roof.
+    const roofY = foundationH + height;
+    const merlon = 0.9;
+    for (const [len, axis] of [[width, "x"], [depth, "z"]] as const) {
+      const count = Math.floor(len / (merlon * 2));
+      for (let i = 0; i < count; i++) {
+        const along = -len / 2 + merlon / 2 + i * merlon * 2 + (len - (count * 2 - 1) * merlon) / 2 - merlon / 2;
+        for (const side of [-1, 1]) {
+          const m = MeshBuilder.CreateBox(`${b.id}-merlon-${axis}-${i}-${side}`, { width: merlon, height: 0.9, depth: merlon }, this.scene);
+          if (axis === "x") m.position.set(along, roofY + 0.45, side * (depth / 2 - merlon / 2));
+          else m.position.set(side * (width / 2 - merlon / 2), roofY + 0.45, along);
+          m.material = this.wallMaterial;
+          parts.push(m);
+        }
+      }
+    }
+
+    // Heavy door, iron bands, braziers either side.
+    const doorWidth = 2.4;
+    const doorHeight = 3.1;
+    const door = MeshBuilder.CreateBox(`${b.id}-door`, { width: doorWidth, height: doorHeight, depth: 0.14 }, this.scene);
+    door.position.set(0, foundationH + doorHeight / 2, depth / 2 + 0.04);
+    door.material = this.doorMaterial;
+    parts.push(door);
+    for (const y of [0.25, 0.75]) {
+      const band = MeshBuilder.CreateBox(`${b.id}-band-${y}`, { width: doorWidth + 0.1, height: 0.16, depth: 0.18 }, this.scene);
+      band.position.set(0, foundationH + doorHeight * y, depth / 2 + 0.06);
+      band.material = ironMat;
+      parts.push(band);
+    }
+    [-1, 1].forEach((side) => {
+      const post = MeshBuilder.CreateCylinder(`${b.id}-brazier-post-${side}`, { diameter: 0.18, height: 1.3 }, this.scene);
+      post.position.set(side * (doorWidth / 2 + 1.1), 0.65, depth / 2 + 0.9);
+      post.material = ironMat;
+      parts.push(post);
+      const bowl = MeshBuilder.CreateCylinder(`${b.id}-brazier-bowl-${side}`, { diameterTop: 0.7, diameterBottom: 0.35, height: 0.35 }, this.scene);
+      bowl.position.set(side * (doorWidth / 2 + 1.1), 1.45, depth / 2 + 0.9);
+      bowl.material = ironMat;
+      parts.push(bowl);
+      const fire = MeshBuilder.CreateSphere(`${b.id}-brazier-fire-${side}`, { diameter: 0.55, segments: 6 }, this.scene);
+      fire.scaling.y = 1.3;
+      fire.position.set(side * (doorWidth / 2 + 1.1), 1.75, depth / 2 + 0.9);
+      fire.material = fireMat;
+      parts.push(fire);
+      // Barred windows.
+      const win = MeshBuilder.CreateBox(`${b.id}-window-${side}`, { width: width * 0.16, height: height * 0.22, depth: 0.08 }, this.scene);
+      win.position.set(side * width * 0.32, foundationH + height * 0.45, depth / 2 + 0.03);
+      win.material = this.windowWoodMaterial;
+      parts.push(win);
+      for (let i = -1; i <= 1; i++) {
+        const bar = MeshBuilder.CreateBox(`${b.id}-bar-${side}-${i}`, { width: 0.08, height: height * 0.22, depth: 0.12 }, this.scene);
+        bar.position.set(side * width * 0.32 + i * width * 0.045, foundationH + height * 0.45, depth / 2 + 0.07);
+        bar.material = ironMat;
+        parts.push(bar);
+      }
+    });
+
+    // The facade sign over the door, and the big billboard on the roof.
+    parts.push(this.buildFacadeSign("WEAPONS", width, depth, foundationH + doorHeight + 0.4, b.id, width * 0.55));
+    const boardWidth = width * 1.05;
+    const boardHeight = boardWidth * (CityBuilder.SHOP_SIGN_PX.height / CityBuilder.SHOP_SIGN_PX.width);
+    const boardBottom = roofY + 2.2;
+    const billboard = MeshBuilder.CreatePlane(`${b.id}-billboard`, { width: boardWidth, height: boardHeight }, this.scene);
+    billboard.position.set(0, boardBottom + boardHeight / 2, depth * 0.2 + 0.08);
+    billboard.rotation.y = Math.PI;
+    billboard.material = this.getShopSignMaterial("WEAPONS STORE");
+    parts.push(billboard);
+    const backing = MeshBuilder.CreateBox(`${b.id}-billboard-back`, { width: boardWidth + 0.3, height: boardHeight + 0.3, depth: 0.14 }, this.scene);
+    backing.position.set(0, boardBottom + boardHeight / 2, depth * 0.2);
+    backing.material = ironMat;
+    parts.push(backing);
+    [-1, 1].forEach((side) => {
+      const leg = MeshBuilder.CreateBox(`${b.id}-billboard-leg-${side}`, { width: 0.3, height: boardBottom - roofY + 0.3, depth: 0.3 }, this.scene);
+      leg.position.set(side * boardWidth * 0.38, roofY + (boardBottom - roofY) / 2, depth * 0.2 - 0.1);
+      leg.material = ironMat;
+      parts.push(leg);
+    });
+
+    const merged = Mesh.MergeMeshes(parts, true, true, undefined, false, true);
+    if (!merged) return;
+    merged.name = `building-${b.id}`;
+    merged.position = new Vector3(b.position.x, groundY, b.position.z);
+    if (b.facingYaw) merged.rotation.y = b.facingYaw;
+    merged.checkCollisions = true;
+    merged.receiveShadows = true;
+    this.shadows?.addShadowCaster(merged);
+  }
+
+  /**
    * The player's safe house — a cosy plastered cottage with a gable roof,
    * a green front door, a lantern either side and a lit "SAFE HOUSE" sign,
    * so it reads as the player's own place from down the street. Built in
@@ -2473,6 +2644,10 @@ export class CityBuilder {
     }
     if (b.id === "healing-shop") {
       this.buildHealingShop(b);
+      return;
+    }
+    if (b.id === "weapons-store") {
+      this.buildWeaponsStore(b);
       return;
     }
     if (b.id === "safe-house") {
@@ -2580,13 +2755,63 @@ export class CityBuilder {
       parts.push(...this.buildWindowsAllSides(b.width, b.depth, b.height, foundationH, b.id));
     }
 
-    const merged = Mesh.MergeMeshes(parts, true, true, undefined, false, true);
-    if (!merged) return;
-    merged.name = `building-${b.id}`;
-    merged.position = new Vector3(b.position.x, groundY, b.position.z);
-    if (b.facingYaw) merged.rotation.y = b.facingYaw;
-    merged.checkCollisions = true;
-    merged.receiveShadows = true;
-    this.shadows?.addShadowCaster(merged);
+    this.batchBuilding(b, parts, groundY);
+  }
+
+  // ---------- Batching ----------
+  //
+  // A regular building is ~6 parts in ~6 materials. Drawn one by one,
+  // hundreds of them meant thousands of draw calls (times three: the
+  // view, the shadow map and the glow pass). Instead every part is
+  // placed in the world and dropped into a batch of the same material in
+  // the same patch of the city; at the end each batch is merged into one
+  // mesh — one draw call per material per patch, however many houses.
+  // Each building keeps an invisible box for walking into and for
+  // line-of-sight checks, which is also far cheaper to collide with than
+  // the merged geometry.
+
+  private static readonly BATCH_CELL = 70;
+  private batches = new Map<string, Mesh[]>();
+
+  private batchBuilding(b: BuildingPlacement, parts: Mesh[], groundY: number) {
+    const placement = new TransformNode(`place-${b.id}`, this.scene);
+    placement.position.set(b.position.x, groundY, b.position.z);
+    placement.rotation.y = b.facingYaw ?? 0;
+    placement.computeWorldMatrix(true);
+    const cell = `${Math.floor(b.position.x / CityBuilder.BATCH_CELL)},${Math.floor(b.position.z / CityBuilder.BATCH_CELL)}`;
+    for (const part of parts) {
+      part.parent = placement;
+      part.computeWorldMatrix(true);
+      part.setParent(null);
+      part.bakeCurrentTransformIntoVertices();
+      const key = `${cell}|${part.material?.uniqueId ?? "none"}`;
+      const list = this.batches.get(key);
+      if (list) list.push(part);
+      else this.batches.set(key, [part]);
+    }
+    placement.dispose();
+
+    // The walk-into / line-of-sight box (named building-* — see CrowdManager's sight checks).
+    const box = MeshBuilder.CreateBox(`building-${b.id}`, { width: b.width, depth: b.depth, height: b.height + 1.2 }, this.scene);
+    box.position.set(b.position.x, groundY + (b.height + 1.2) / 2, b.position.z);
+    box.rotation.y = b.facingYaw ?? 0;
+    box.isVisible = false;
+    box.checkCollisions = true;
+    box.freezeWorldMatrix();
+  }
+
+  /** Merges each batch into one mesh. Call once, after every building is built. */
+  private flushBatches() {
+    let i = 0;
+    for (const parts of this.batches.values()) {
+      const merged = parts.length === 1 ? parts[0] : Mesh.MergeMeshes(parts, true, true, undefined, false, false);
+      if (!merged) continue;
+      merged.name = `city-batch-${i++}`;
+      merged.isPickable = false;
+      merged.checkCollisions = false;
+      merged.receiveShadows = true;
+      this.shadows?.addShadowCaster(merged);
+    }
+    this.batches.clear();
   }
 }

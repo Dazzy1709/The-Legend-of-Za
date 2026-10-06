@@ -3,12 +3,38 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="./src/styles/index.css">
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>legend-of-za</title>
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- viewport-fit=cover: the game fills the whole screen, notch included (the HUD keeps clear of it — see .safe-frame). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#0c0a09" />
+    <!-- Added to the home screen, it opens full screen with no browser bars. -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Legend of Za" />
+    <title>The Legend of Za</title>
+    <link rel="preload" as="image" href="/assets/ui/loading.webp" />
+    <style>
+      /* Shown until the game's code has downloaded and React replaces it (see LoadingScreen for the in-game one). */
+      .boot-splash { position: fixed; inset: 0; overflow: hidden; background: #0c0a09; }
+      .boot-splash img { position: absolute; inset: 0; width: 100%; height: 100%; }
+      .boot-splash .bg { object-fit: cover; opacity: 0.6; filter: blur(40px); transform: scale(1.1); }
+      .boot-splash .art { object-fit: contain; }
+      .boot-splash .bar { position: absolute; left: max(1rem, env(safe-area-inset-left)); right: max(1rem, env(safe-area-inset-right)); bottom: max(0.75rem, env(safe-area-inset-bottom)); height: 6px; border-radius: 9999px; background: rgba(255, 255, 255, 0.15); overflow: hidden; }
+      .boot-splash .bar::after { content: ""; position: absolute; top: 0; bottom: 0; width: 30%; border-radius: 9999px; background: linear-gradient(90deg, #d97706, #fbbf24, #fde68a); animation: boot-slide 1.4s ease-in-out infinite; }
+      @keyframes boot-slide { from { left: -30%; } to { left: 100%; } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="boot-splash" aria-label="Loading">
+        <img class="bg" src="/assets/ui/loading.webp" alt="" />
+        <img class="art" src="/assets/ui/loading.webp" alt="The Legend of Za" />
+        <div class="bar"></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

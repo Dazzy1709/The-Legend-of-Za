@@ -4,10 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev.mjs",
+    "dev:client": "vite",
     "build": "tsc -b && vite build",
+    "build:static": "tsc -b && vite build --mode static",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "node --experimental-strip-types --no-warnings=ExperimentalWarning --watch server/index.ts"
   },
   "dependencies": {
     "@babylonjs/core": "^9.26.0",

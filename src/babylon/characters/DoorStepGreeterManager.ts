@@ -22,6 +22,7 @@
 // same way the door does.
 
 import { Scene, ShadowGenerator, Vector3 } from "@babylonjs/core";
+import { QUALITY } from "../core/Quality";
 import { CHARACTER_ACTIVE_RADIUS } from "./CrowdManager";
 import {
   buildAvenueFrontage,
@@ -46,7 +47,7 @@ const DOOR_SIDE_OFFSET = 1.0;
 // read as crowded rather than "a few people lingering by their door."
 // Deterministic (seed-based, not Math.random) so the same buildings get
 // greeters on every reload rather than reshuffling.
-const GREETER_CHANCE = 0.05;
+const GREETER_CHANCE = 0.05 * QUALITY.greeterScale; // fewer on phones — see Quality.ts
 
 function seedFor(x: number, z: number): number {
   const s = Math.sin(x * 63.71 + z * 19.31) * 29104.171;
