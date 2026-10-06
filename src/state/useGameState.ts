@@ -15,7 +15,8 @@ import type {
 } from "../types";
 import { DIALOGUE_TREES } from "../content/dialogue/dialogueTrees";
 import { STRAINS, STRAIN_PRICES } from "../content/items/strains";
-import { NPC_PLACEMENTS } from "../content/cities/kushtar/placements";
+import { STARTING_WEAPONS, WEAPON_STORE } from "../content/items/weapons";
+import type { UiStartState } from "../services/save/SaveSystem";
 import { maxHealthForEndurance, statForLevel } from "../babylon/progression/Progression";
 
 // ---------- Initial state ----------
@@ -46,6 +47,8 @@ export interface GameState {
   questFlags: string[];
   message: string | null; // transient toast, e.g. "You found 5 gold"
   equippedWeapon: WeaponKind | null;
+  /** Weapons the player has — only these can be equipped. */
+  ownedWeapons: WeaponKind[];
 }
 
 const initialState: GameState = {
@@ -55,12 +58,13 @@ const initialState: GameState = {
   questFlags: [],
   message: null,
   equippedWeapon: null,
+  ownedWeapons: STARTING_WEAPONS,
 };
 
 // ---------- Actions ----------
 
 type Action =
-  | { type: "TALK_TO_NPC"; npcId: string }
+  | { type: "TALK_TO_NPC"; npcId: string; treeId: string }
   | { type: "CHOOSE_DIALOGUE"; choiceId: string }
   | { type: "OPEN_INVENTORY" }
   | { type: "CLOSE_INVENTORY" }
@@ -74,16 +78,15 @@ type Action =
   | { type: "SYNC_PLAYER_HEALTH"; current: number; max: number }
   | { type: "ADD_GOLD"; amount: number }
   | { type: "BUY_STRAIN"; strainId: string }
+  | { type: "BUY_WEAPON"; weapon: WeaponKind }
   | { type: "MOVE_INVENTORY_ITEM"; from: number; to: number };
 
 function reducer(state: GameState, action: Action): GameState {
   switch (action.type) {
     case "TALK_TO_NPC": {
       if (state.mode !== "explore") return state;
-      const placement = NPC_PLACEMENTS.find((n) => n.id === action.npcId);
-      if (!placement) return state;
-      const tree = DIALOGUE_TREES[placement.dialogueTreeId];
-      if (!tree) return state;
+      const tree = DIALOGUE_TREES[action.treeId];
+      if (!tree || tree.npcId !== action.npcId) return state;
       return {
         ...state,
         mode: "dialogue",
@@ -189,6 +192,17 @@ function reducer(state: GameState, action: Action): GameState {
       };
     }
 
+    case "BUY_WEAPON": {
+      const item = WEAPON_STORE.find((w) => w.kind === action.weapon);
+      if (!item || state.ownedWeapons.includes(item.kind) || state.player.gold < item.price) return state;
+      return {
+        ...state,
+        ownedWeapons: [...state.ownedWeapons, item.kind],
+        player: { ...state.player, gold: state.player.gold - item.price },
+        message: `Bought the ${item.name} for ${item.price} gold. Press 3 to equip it.`,
+      };
+    }
+
     case "MOVE_INVENTORY_ITEM": {
       // Drag-and-drop in the Satchel. Dropping onto another item swaps
       // the two; dropping onto an empty slot moves the item there — the
@@ -221,10 +235,28 @@ function reducer(state: GameState, action: Action): GameState {
   }
 }
 
-export function useGameState() {
-  const [state, dispatch] = useReducer(reducer, initialState);
+/** The starting state — a new game's, or a loaded save's (see services/save/SaveSystem). */
+function startState(from?: UiStartState | null): GameState {
+  if (!from) return initialState;
+  return {
+    ...initialState,
+    equippedWeapon: from.equippedWeapon,
+    ownedWeapons: from.ownedWeapons,
+    questFlags: from.questFlags,
+    player: {
+      ...initialState.player,
+      gold: from.gold,
+      inventory: from.inventory,
+      reputation: from.reputation,
+    },
+  };
+}
 
-  const talkToNpc = useCallback((npcId: string) => dispatch({ type: "TALK_TO_NPC", npcId }), []);
+export function useGameState(from?: UiStartState | null) {
+  const [state, dispatch] = useReducer(reducer, from, startState);
+
+  /** Opens `treeId` (see dialogueTreeFor) with `npcId`. */
+  const talkToNpc = useCallback((npcId: string, treeId: string) => dispatch({ type: "TALK_TO_NPC", npcId, treeId }), []);
   const chooseDialogue = useCallback(
     (choiceId: string) => dispatch({ type: "CHOOSE_DIALOGUE", choiceId }),
     []
@@ -255,6 +287,7 @@ export function useGameState() {
   );
   const addGold = useCallback((amount: number) => dispatch({ type: "ADD_GOLD", amount }), []);
   const buyStrain = useCallback((strainId: string) => dispatch({ type: "BUY_STRAIN", strainId }), []);
+  const buyWeapon = useCallback((weapon: WeaponKind) => dispatch({ type: "BUY_WEAPON", weapon }), []);
   const moveInventoryItem = useCallback(
     (from: number, to: number) => dispatch({ type: "MOVE_INVENTORY_ITEM", from, to }),
     []
@@ -277,6 +310,7 @@ export function useGameState() {
       syncPlayerHealth,
       addGold,
       buyStrain,
+      buyWeapon,
       moveInventoryItem,
     }),
     [
@@ -295,6 +329,7 @@ export function useGameState() {
       syncPlayerHealth,
       addGold,
       buyStrain,
+      buyWeapon,
       moveInventoryItem,
     ]
   );

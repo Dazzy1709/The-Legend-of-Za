@@ -298,6 +298,34 @@ export function Minimap({ engineRef, className = "bottom-4 right-4" }: MinimapPr
         }
       }
 
+      // The current story objective — a gold diamond (pinned to the edge when it's off the map).
+      const objective = engine?.getObjectiveMarker();
+      if (engine && objective) {
+        const pos = engine.getPlayerPosition();
+        const facing = engine.getCameraForwardYaw();
+        let dx = (objective.x - pos.x) * WORLD_TO_MAP_SCALE;
+        let dy = -(objective.z - pos.z) * WORLD_TO_MAP_SCALE;
+        // Into map-space (the map turns with the camera), then clamp to the frame.
+        const cos = Math.cos(-facing);
+        const sin = Math.sin(-facing);
+        const rx = dx * cos - dy * sin;
+        const ry = dx * sin + dy * cos;
+        const limitX = MAP_WIDTH / 2 - MAP_PADDING - 6;
+        const limitY = MAP_HEIGHT / 2 - MAP_PADDING - 6;
+        const k = Math.min(1, limitX / Math.max(1e-6, Math.abs(rx)), limitY / Math.max(1e-6, Math.abs(ry)));
+        dx = rx * k;
+        dy = ry * k;
+        ctx.save();
+        ctx.translate(MAP_WIDTH / 2 + dx, MAP_HEIGHT / 2 + dy);
+        ctx.rotate(Math.PI / 4);
+        ctx.fillStyle = "#fbbf24";
+        ctx.strokeStyle = "#451a03";
+        ctx.lineWidth = 1.5;
+        ctx.fillRect(-4.5, -4.5, 9, 9);
+        ctx.strokeRect(-4.5, -4.5, 9, 9);
+        ctx.restore();
+      }
+
       // The player marker — fixed at the exact center, always pointing
       // straight up, since the world rotates around it instead of the
       // other way around.

@@ -12,8 +12,8 @@ export const MAX_CHARACTER_LEVEL = 100;
 export const MAX_WEAPON_LEVEL = 99;
 export const STAT_NAMES: StatName[] = ["strength", "endurance", "cardio", "defense"];
 
-/** How many levels above the player every enemy is. */
-export const ENEMY_LEVEL_OFFSET = 3;
+/** How many levels above the player an enemy is — each one rolls a value in this range. */
+export const ENEMY_LEVEL_ABOVE = { min: 1, max: 2 };
 
 // ---------- Stats ----------
 
@@ -168,10 +168,6 @@ export class ProgressionSystem {
     return weaponDamageForLevel(kind, this.getWeaponLevel(kind));
   }
 
-  getEnemyLevel(): number {
-    return Math.min(MAX_CHARACTER_LEVEL, this.level + ENEMY_LEVEL_OFFSET);
-  }
-
   /** Adds XP to the character — and, if given, the same amount to that weapon. */
   grantXp(amount: number, weapon?: WeaponKind | null) {
     if (amount <= 0) return;
@@ -212,6 +208,24 @@ export class ProgressionSystem {
 
   getBuffs(): readonly StatBuff[] {
     return this.buffs;
+  }
+
+  /** What a save keeps: level, XP and each weapon's level and XP (buffs are temporary and aren't saved). */
+  exportState(): { level: number; xp: number; weapons: Partial<Record<WeaponKind, { level: number; xp: number }>> } {
+    const weapons: Partial<Record<WeaponKind, { level: number; xp: number }>> = {};
+    for (const [kind, w] of this.weapons) weapons[kind] = { level: w.level, xp: w.xp };
+    return { level: this.level, xp: this.xp, weapons };
+  }
+
+  /** Restores a saved state (see exportState). */
+  importState(state: { level: number; xp: number; weapons: Partial<Record<WeaponKind, { level: number; xp: number }>> }) {
+    this.level = Math.max(1, Math.min(MAX_CHARACTER_LEVEL, Math.floor(state.level) || 1));
+    this.xp = Math.max(0, state.xp || 0);
+    for (const kind of WEAPON_KINDS) {
+      const saved = state.weapons[kind];
+      if (saved) this.weapons.set(kind, { level: Math.max(1, Math.min(MAX_WEAPON_LEVEL, Math.floor(saved.level) || 1)), xp: Math.max(0, saved.xp || 0) });
+    }
+    this.emitChanged();
   }
 
   getSnapshot(): ProgressionSnapshot {

@@ -44,6 +44,7 @@
 // literally share the same sprite cell.
 
 import { Ray, Scene, ShadowGenerator, Sprite, SpriteManager, Vector3 } from "@babylonjs/core";
+import { QUALITY, scaledCount } from "../core/Quality";
 import { CELL_SIZE, CITY_SPAN, RING_ROAD_RADIUS } from "../world/CityBuilder";
 import { type CharacterSkinId, SkeletalCharacter } from "./SkeletalCharacter";
 import { sampleTerrainHeight } from "../world/TerrainBuilder";
@@ -256,6 +257,7 @@ export class CrowdManager {
     mode: CrowdMode = "wander",
     enableConversations = false
   ) {
+    count = scaledCount(count, QUALITY.crowdScale); // fewer on phones — see Quality.ts
     this.instanceTag = `${center.x.toFixed(0)}-${center.z.toFixed(0)}-${mode}`;
     this.mode = mode;
     this.enableConversations = enableConversations && mode === "wander";

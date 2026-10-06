@@ -59,7 +59,7 @@ export function VirtualJoystick({ onMove }: VirtualJoystickProps) {
       onPointerMove={handlePointerMove}
       onPointerUp={release}
       onPointerCancel={release}
-      className="fixed bottom-8 left-8 rounded-full bg-stone-900/50 border border-stone-500/40 touch-none select-none z-20"
+      className="fixed bottom-8 left-8 compact:bottom-3! compact:left-4! rounded-full bg-stone-900/50 border border-stone-500/40 touch-none select-none z-20"
       style={{ width: BASE_RADIUS * 2, height: BASE_RADIUS * 2 }}
     >
       <div

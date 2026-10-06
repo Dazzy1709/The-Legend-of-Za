@@ -8,12 +8,14 @@ import {
   Matrix,
   Mesh,
   MeshBuilder,
+  type Node,
   ParticleSystem,
   Quaternion,
   Ray,
   Scene,
   Space,
   StandardMaterial,
+  TransformNode,
   Vector3,
 } from "@babylonjs/core";
 import {type NinjaAnimation, SkeletalCharacter } from "../characters/SkeletalCharacter";
@@ -24,8 +26,9 @@ import { CombatManager, type Combatant } from "../combat/CombatManager";
 import { EventBridge } from "../core/EventBridge";
 import { maxHealthForEndurance, sprintSecondsForCardio, statForLevel, type ProgressionSystem } from "../progression/Progression";
 
-const MOVE_SPEED = 3; // units/sec at full acceleration
-const SPRINT_MULTIPLIER = 3.5;
+const MOVE_SPEED = 4.6; // units/sec walking, at full acceleration (was 3 — felt sluggish)
+const SPRINT_MULTIPLIER = 2.3; // sprint stays ~10.5 units/sec
+const WALK_ANIMATION_SPEED = 1.35; // the walk clip sped up to match MOVE_SPEED, so the feet don't slide
 const JUMP_SPEED = 9;
 const GRAVITY = -25;
 const GROUND_OFFSET = 1; // capsule half-height above the terrain surface
@@ -75,13 +78,15 @@ const EXHAUSTION_RECOVERED = 0.3;
 /** How far the arms kick up per shot (radians), and how fast that settles back (per second, exponential). */
 const ARM_RECOIL_KICK = 0.16;
 /**
- * The aim clip puts both hands in the same spot on this rig, so they
- * overlap. Swinging the left (support) arm out by this much, about the
- * vertical, sets its hand just beside and a little behind the gun hand.
+ * Where the support (left) hand holds the gun, relative to the gun hand:
+ * a little along the barrel, out to the left, and a touch below — the
+ * left palm cupping the right hand on the grip. The left arm is bent to
+ * reach it each frame (two-bone IK), so both hands are on the weapon
+ * whatever the clip, the aim pitch or the recoil.
  */
-const SUPPORT_ARM_SPREAD = -0.24;
-/** The same for the lowered, two-handed gun idle (its hands sit the other side of the shoulder line, hence the sign). */
-const SUPPORT_ARM_SPREAD_IDLE = 0.12;
+const SUPPORT_GRIP_FORWARD = 0.03;
+const SUPPORT_GRIP_LEFT = 0.07;
+const SUPPORT_GRIP_DOWN = 0.035;
 const ARM_RECOIL_RECOVERY = 14;
 /** After a shot the arms stay in the aiming pose this long (seconds), then go back to the walk/run/idle arms — unless still aiming. */
 const AIM_POSE_HOLD_AFTER_SHOT = 0.6;
@@ -513,11 +518,11 @@ export class PlayerController implements Combatant {
       if (this.draggingLook || this.pointerLocked) applyButtons(e.buttons); // a second button pressed or released mid-hold
       if (e.buttons === 0) this.draggingLook = false;
       if (!this.pointerLocked && e.target !== this.canvas && !this.draggingLook) return;
-      const sensitivity = this.aiming ? MOUSE_SENSITIVITY * AIM_SENSITIVITY_MULTIPLIER : MOUSE_SENSITIVITY;
+      const sensitivity = (this.aiming ? MOUSE_SENSITIVITY * AIM_SENSITIVITY_MULTIPLIER : MOUSE_SENSITIVITY) * this.lookSensitivity;
       const lower = this.camera.lowerBetaLimit ?? 0.06;
       const upper = this.camera.upperBetaLimit ?? Math.PI - 0.06;
       this.camera.alpha -= e.movementX * sensitivity;
-      this.camera.beta = Math.min(upper, Math.max(lower, this.camera.beta - e.movementY * sensitivity));
+      this.camera.beta = Math.min(upper, Math.max(lower, this.camera.beta - e.movementY * sensitivity * (this.invertLookY ? -1 : 1)));
     };
     document.addEventListener("pointermove", this.mouseMoveHandler);
   }
@@ -850,6 +855,15 @@ export class PlayerController implements Combatant {
     };
   }
 
+  /** Player settings: look speed multiplier and inverted vertical look. */
+  private lookSensitivity = 1;
+  private invertLookY = false;
+
+  setLookSettings(sensitivity: number, invertY: boolean) {
+    this.lookSensitivity = Math.max(0.25, Math.min(2, sensitivity));
+    this.invertLookY = invertY;
+  }
+
   /** True while a vehicle (the Budmobile) drives the player — see setExternalControl. */
   private externalControl = false;
 
@@ -922,6 +936,15 @@ export class PlayerController implements Combatant {
       down: !!this.keys["c"] || !!this.keys["control"] || this.attackHeld,
       boost: !!this.keys["shift"] || this.virtualSprint,
     };
+  }
+
+  /** Puts the player at a saved spot, facing a saved way, with saved health (at least 1). */
+  restoreState(x: number, z: number, facing: number, health: number) {
+    this.mesh.position.set(x, sampleTerrainHeight(x, z) + GROUND_OFFSET, z);
+    this.velocity.set(0, 0, 0);
+    this.setFacingYaw(facing);
+    this.currentHealth = Math.max(1, Math.min(this.getMaxHealth(), Math.round(health)));
+    this.bridge?.emit("playerHealthChanged", { current: this.currentHealth, max: this.getMaxHealth() });
   }
 
   /** Resting at a safe house: full health and a full stamina bar, with the heal sparkle. */
@@ -1214,19 +1237,113 @@ export class PlayerController implements Combatant {
     for (const bone of ["mixamorig:Spine1", "mixamorig:Spine2"]) {
       this.character.getBoneNode(bone)?.rotate(right, -pitchUp * 0.5, Space.WORLD);
     }
-    // Two hands on the gun, side by side rather than through each other
-    // (the aim pose plays on the arms while moving, on the whole body
-    // standing still — either way, whenever the gun is up).
-    const gunUp = (this.aiming || this.aimPoseHold > 0) && this.reloadRemaining <= 0 && !this.playingHeadHit;
-    if (gunUp) {
-      this.character.getBoneNode("mixamorig:LeftArm")?.rotate(Vector3.Up(), SUPPORT_ARM_SPREAD, Space.WORLD);
-    } else if (this.character.getCurrentAnimation() === "pistolIdle" && !this.character.getUpperBodyOverlay()) {
-      this.character.getBoneNode("mixamorig:LeftArm")?.rotate(Vector3.Up(), SUPPORT_ARM_SPREAD_IDLE, Space.WORLD);
-    }
     if (this.armRecoil > 0.001) {
       for (const bone of ["mixamorig:RightArm", "mixamorig:LeftArm"]) {
         this.character.getBoneNode(bone)?.rotate(right, -this.armRecoil, Space.WORLD);
       }
+    }
+    // Both hands on the weapon (not while reloading — that clip moves the hands itself — or flinching).
+    if (this.reloadRemaining <= 0 && !this.playingHeadHit && !this.externalControl) this.placeSupportHand(right);
+  }
+
+  /** Recomputes a node's world matrix along with every ancestor's, top down (after bones were rotated this frame). */
+  private refreshWorld(node: TransformNode) {
+    const chain: TransformNode[] = [];
+    for (let n: Node | null = node; n; n = n.parent) if (n instanceof TransformNode) chain.unshift(n);
+    for (const n of chain) n.computeWorldMatrix(true);
+  }
+
+  /**
+   * Bends the left arm so the left hand lands on the gun beside the right
+   * (see SUPPORT_GRIP_*). Two-bone IK in world space: the elbow is bent to
+   * make the shoulder-to-wrist distance right, then the whole arm is
+   * swung to point at the grip, then turned about that line so the elbow
+   * hangs down and out rather than up.
+   */
+  private placeSupportHand(charRight: Vector3) {
+    const ch = this.character;
+    const muzzle = this.equippedWeapon?.muzzle;
+    if (!ch || !muzzle) return;
+    const shoulder = ch.getBoneNode("mixamorig:LeftArm");
+    const elbow = ch.getBoneNode("mixamorig:LeftForeArm");
+    const wrist = ch.getBoneNode("mixamorig:LeftHand");
+    const gunHand = ch.getBoneNode("mixamorig:RightHand");
+    if (!shoulder || !elbow || !wrist || !gunHand) return;
+
+    this.refreshWorld(muzzle);
+    const grip = gunHand.getAbsolutePosition().clone();
+    const barrel = muzzle.getAbsolutePosition().subtract(grip);
+    if (barrel.lengthSquared() < 1e-6) return;
+    barrel.normalize();
+    const along = (v: Vector3) => v.subtract(barrel.scale(Vector3.Dot(barrel, v))).normalize();
+    const left = along(charRight.scale(-1));
+    const down = along(new Vector3(0, -1, 0));
+    const target = grip
+      .add(barrel.scale(SUPPORT_GRIP_FORWARD))
+      .add(left.scale(SUPPORT_GRIP_LEFT))
+      .add(down.scale(SUPPORT_GRIP_DOWN));
+
+    this.refreshWorld(wrist);
+    const S = shoulder.getAbsolutePosition().clone();
+    const E = elbow.getAbsolutePosition().clone();
+    const W = wrist.getAbsolutePosition().clone();
+    const upper = Vector3.Distance(S, E);
+    const lower = Vector3.Distance(E, W);
+    const reach = Math.min(upper + lower - 0.001, Math.max(Math.abs(upper - lower) + 0.001, Vector3.Distance(S, target)));
+
+    // 1. Elbow angle for that reach.
+    const toS = S.subtract(E).normalize();
+    const toW = W.subtract(E).normalize();
+    const current = Math.acos(Math.max(-1, Math.min(1, Vector3.Dot(toS, toW))));
+    const wanted = Math.acos(Math.max(-1, Math.min(1, (upper * upper + lower * lower - reach * reach) / (2 * upper * lower))));
+    let hinge = Vector3.Cross(toS, toW);
+    if (hinge.lengthSquared() < 1e-8) hinge = charRight.clone();
+    hinge.normalize();
+    this.rotateTowards(elbow, wrist, hinge, wanted - current, () => {
+      const s = shoulder.getAbsolutePosition();
+      const e = elbow.getAbsolutePosition();
+      const w = wrist.getAbsolutePosition();
+      return Math.abs(Math.acos(Math.max(-1, Math.min(1, Vector3.Dot(s.subtract(e).normalize(), w.subtract(e).normalize())))) - wanted);
+    });
+
+    // 2. Swing the arm so the wrist points at the grip.
+    const W2 = wrist.getAbsolutePosition().subtract(S).normalize();
+    const T = target.subtract(S).normalize();
+    const swingAxis = Vector3.Cross(W2, T);
+    if (swingAxis.lengthSquared() > 1e-10) {
+      const swing = Math.acos(Math.max(-1, Math.min(1, Vector3.Dot(W2, T))));
+      this.rotateTowards(shoulder, wrist, swingAxis.normalize(), swing, () => Vector3.Distance(wrist.getAbsolutePosition(), target));
+    }
+
+    // 3. Elbow down and out: turn the arm about the shoulder-to-grip line.
+    const axis = target.subtract(S).normalize();
+    const pole = down.add(left).normalize();
+    const elbowNow = elbow.getAbsolutePosition().subtract(S);
+    const elbowDir = elbowNow.subtract(axis.scale(Vector3.Dot(axis, elbowNow)));
+    const poleDir = pole.subtract(axis.scale(Vector3.Dot(axis, pole)));
+    if (elbowDir.lengthSquared() > 1e-8 && poleDir.lengthSquared() > 1e-8) {
+      elbowDir.normalize();
+      poleDir.normalize();
+      const twist = Math.acos(Math.max(-1, Math.min(1, Vector3.Dot(elbowDir, poleDir))));
+      this.rotateTowards(shoulder, elbow, axis, twist * 0.8, () => -Vector3.Dot(elbow.getAbsolutePosition().subtract(S).normalize(), poleDir));
+    }
+  }
+
+  /**
+   * Rotates `node` about `axis` (world space) by `angle`, then checks
+   * with `error` (lower is better, measured after recomputing `probe`'s
+   * world position) — and if that made things worse, the rotation sense
+   * was backwards for this rig, so it turns the other way instead.
+   */
+  private rotateTowards(node: TransformNode, probe: TransformNode, axis: Vector3, angle: number, error: () => number) {
+    if (Math.abs(angle) < 1e-5) return;
+    this.refreshWorld(probe);
+    const before = error();
+    node.rotate(axis, angle, Space.WORLD);
+    this.refreshWorld(probe);
+    if (error() > before) {
+      node.rotate(axis, -2 * angle, Space.WORLD);
+      this.refreshWorld(probe);
     }
   }
 
@@ -2352,10 +2469,12 @@ export class PlayerController implements Combatant {
       // SkeletalCharacter.ts's animation set entirely, not just unused
       // here.)
       if (!moving) this.character.play("idle");
-      else this.character.play(sprinting ? "running" : "walkForward");
+      else if (sprinting) this.character.play("running");
+      else this.character.play("walkForward", true, undefined, WALK_ANIMATION_SPEED);
     } else {
       if (!moving) this.character.play("idle");
-      else this.character.play(sprinting ? "running" : "walkForward");
+      else if (sprinting) this.character.play("running");
+      else this.character.play("walkForward", true, undefined, WALK_ANIMATION_SPEED);
     }
   }
 

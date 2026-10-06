@@ -12,7 +12,7 @@ export function InteractionPrompt({ label, action = "talk to", onTap }: Interact
   return (
     <button
       onClick={onTap}
-      className="fixed bottom-24 sm:bottom-8 left-1/2 -translate-x-1/2 bg-stone-900/90 border border-amber-700/60 text-amber-200 text-sm px-4 py-2 rounded-full shadow-lg backdrop-blur-sm z-20 active:scale-95 transition-transform"
+      className="fixed bottom-24 sm:bottom-8 compact:bottom-4! left-1/2 -translate-x-1/2 bg-stone-900/90 border border-amber-700/60 text-amber-200 text-sm px-4 py-2 rounded-full shadow-lg backdrop-blur-sm z-20 active:scale-95 transition-transform"
     >
       <span className="hidden sm:inline">
         Press <kbd className="px-1.5 py-0.5 bg-stone-800 rounded text-amber-300 mx-1">E</kbd>

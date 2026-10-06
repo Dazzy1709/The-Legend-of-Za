@@ -10,6 +10,8 @@ import type { ProgressionSnapshot } from "../../babylon/progression/Progression"
 interface HUDProps {
   player: PlayerState;
   equippedWeapon: WeaponKind | null;
+  /** Weapons the player has; the others show locked. */
+  ownedWeapons: WeaponKind[];
   onOpenInventory: () => void;
   /** Replaces the old onOpenWeaponWheel — selection now lives directly in the side dock below, so there's nothing to "open" anymore. Same handler a weapon-wheel onSelect would have called. */
   onSelectWeapon: (weapon: WeaponKind) => void;
@@ -21,6 +23,8 @@ interface HUDProps {
   progression: ProgressionSnapshot | null;
   /** For the stamina bar and buff timers, which change every frame. */
   engineRef: React.MutableRefObject<GameEngine | null>;
+  /** Opens the pause menu. */
+  onOpenMenu: () => void;
 }
 
 interface WeaponSlot {
@@ -38,7 +42,7 @@ const WEAPON_SLOTS: WeaponSlot[] = [
 
 const PLATE = "border border-amber-900/50 bg-stone-950/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_4px_16px_rgba(0,0,0,0.55)]";
 
-export function HUD({ player, equippedWeapon, onOpenInventory, onSelectWeapon, onUnequipWeapon, onUseHealingLeaf, progression, engineRef }: HUDProps) {
+export function HUD({ player, equippedWeapon, ownedWeapons, onOpenInventory, onSelectWeapon, onUnequipWeapon, onUseHealingLeaf, progression, engineRef, onOpenMenu }: HUDProps) {
   const hpPct = Math.round((player.hp / player.maxHp) * 100);
 
   return (
@@ -47,15 +51,15 @@ export function HUD({ player, equippedWeapon, onOpenInventory, onSelectWeapon, o
           it down, so the world reads as the full screen and the HUD reads
           as an overlay on top of it. The wrapper is click-through
           (pointer-events-none); only the plates themselves need clicks. */}
-      <div className="pointer-events-none fixed inset-x-0 top-0 z-10 flex items-start justify-between gap-2 p-3 sm:gap-3 sm:p-4">
-        <div className={`pointer-events-auto flex min-w-0 flex-col gap-1.5 rounded-md px-3.5 py-2.5 ${PLATE}`}>
+      <div className="pointer-events-none fixed inset-x-0 top-0 z-10 flex items-start justify-between gap-2 p-3 sm:gap-3 sm:p-4 compact:p-2!">
+        <div className={`pointer-events-auto flex min-w-0 flex-col gap-1.5 rounded-md px-3.5 py-2.5 compact:gap-1! compact:px-2.5! compact:py-1.5! ${PLATE}`}>
           <span className="truncate font-serif text-sm text-amber-200 sm:text-base">{player.name}</span>
           <div className="flex items-center gap-2.5">
             {/* Level, in a round badge right beside the health bar. */}
             {progression && <LevelBadge level={progression.level} size="md" tone="player" title={`Level ${progression.level}`} />}
             <div className="flex flex-col gap-1">
               <div className="flex items-center gap-2">
-                <div className="relative h-3 w-28 overflow-hidden rounded-sm border border-black/40 bg-stone-900 sm:w-40">
+                <div className="relative h-3 w-28 overflow-hidden rounded-sm border border-black/40 bg-stone-900 sm:w-40 compact:h-2.5! compact:w-28!">
                   <div
                     className="h-full bg-linear-to-b from-rose-500 via-rose-600 to-rose-800 transition-all duration-300"
                     style={{ width: `${hpPct}%` }}
@@ -67,7 +71,7 @@ export function HUD({ player, equippedWeapon, onOpenInventory, onSelectWeapon, o
                 </span>
               </div>
               {/* XP toward the next level, right under the health bar. */}
-              {progression && <XpBar xp={progression.xp} xpToNext={progression.xpToNext} showText className="w-28 sm:w-40" />}
+              {progression && <XpBar xp={progression.xp} xpToNext={progression.xpToNext} showText className="w-28 sm:w-40 compact:w-28!" />}
             </div>
           </div>
           {/* Sprint stamina (cardio), under the level, health and XP. */}
@@ -75,7 +79,7 @@ export function HUD({ player, equippedWeapon, onOpenInventory, onSelectWeapon, o
           <BuffList engineRef={engineRef} />
         </div>
 
-        <div className={`pointer-events-auto flex shrink-0 items-center gap-3 rounded-md px-3.5 py-2.5 ${PLATE}`}>
+        <div className={`pointer-events-auto flex shrink-0 items-center gap-3 rounded-md px-3.5 py-2.5 compact:gap-2! compact:px-2.5! compact:py-1.5! ${PLATE}`}>
           <span className="flex items-center gap-1 text-xs tabular-nums text-amber-300 sm:text-sm">
             <span aria-hidden>◆</span>
             {player.gold}
@@ -86,6 +90,14 @@ export function HUD({ player, equippedWeapon, onOpenInventory, onSelectWeapon, o
           >
             Bag
           </button>
+          <button
+            onClick={onOpenMenu}
+            title="Menu & settings (Esc)"
+            aria-label="Menu and settings"
+            className="rounded-md border border-stone-700/60 bg-stone-800 px-2.5 py-1.5 text-xs text-stone-200 transition-colors hover:bg-stone-700 sm:text-sm"
+          >
+            ⚙
+          </button>
         </div>
       </div>
 
@@ -93,10 +105,12 @@ export function HUD({ player, equippedWeapon, onOpenInventory, onSelectWeapon, o
           separate wheel overlay you had to open. Tapping the equipped
           slot again unequips, mirroring the wheel's own center "Unequip"
           button. */}
-      <div className="pointer-events-none fixed right-3 top-[42%] z-10 flex -translate-y-1/2 flex-col items-end gap-2 sm:right-4 sm:gap-2.5">
+      {/* On touch screens (and short ones) it's a row instead, above the action buttons. */}
+      <div className="pointer-events-none fixed right-3 top-[42%] z-10 flex -translate-y-1/2 flex-col items-end gap-2 sm:right-4 sm:gap-2.5 compact:top-auto! compact:right-2! compact:bottom-[5.25rem]! compact:translate-y-0! compact:flex-row! compact:gap-1.5!">
         {WEAPON_SLOTS.map((slot) => {
           const isEquipped = equippedWeapon === slot.kind;
-          const weapon = progression?.weapons[slot.kind];
+          const owned = ownedWeapons.includes(slot.kind);
+          const weapon = owned ? progression?.weapons[slot.kind] : undefined;
           return (
             // Each weapon: its level in a round badge beside it, its XP bar underneath.
             <div key={slot.kind} className="flex items-center gap-1.5">
@@ -104,19 +118,22 @@ export function HUD({ player, equippedWeapon, onOpenInventory, onSelectWeapon, o
               <div className="flex flex-col items-center gap-1">
                 <button
                   onClick={() => (isEquipped ? onUnequipWeapon() : onSelectWeapon(slot.kind))}
-                  title={`${slot.label} (${slot.key})${weapon ? ` — level ${weapon.level}, ${weapon.damage} damage` : ""}`}
-                  className={`group pointer-events-auto relative flex h-12 w-12 flex-col items-center justify-center rounded-md border-2 transition-all sm:h-14 sm:w-14 ${
+                  title={owned ? `${slot.label} (${slot.key})${weapon ? ` — level ${weapon.level}, ${weapon.damage} damage` : ""}` : `${slot.label} — not owned yet (Weapons Store)`}
+                  className={`group pointer-events-auto relative flex h-12 w-12 flex-col items-center justify-center rounded-md border-2 transition-all sm:h-14 sm:w-14 compact:h-10! compact:w-10! ${
                     isEquipped
                       ? "border-amber-400 bg-amber-700/90 text-stone-950 shadow-[0_0_14px_rgba(251,191,36,0.45)]"
-                      : "border-stone-700/70 bg-stone-950/85 text-stone-200 hover:border-amber-700/70 hover:bg-stone-900"
+                      : owned
+                        ? "border-stone-700/70 bg-stone-950/85 text-stone-200 hover:border-amber-700/70 hover:bg-stone-900"
+                        : "border-stone-800/70 bg-stone-950/70 text-stone-200"
                   }`}
                 >
-                  <span className="text-lg leading-none sm:text-xl">{slot.icon}</span>
+                  <span className={`text-lg leading-none sm:text-xl ${owned ? "" : "opacity-30 grayscale"}`}>{slot.icon}</span>
+                  {!owned && <span className="pointer-events-none absolute bottom-0.5 right-1 text-[10px]">🔒</span>}
                   <span className={`pointer-events-none absolute left-1 top-0.5 text-[8px] ${isEquipped ? "text-stone-900/70" : "text-stone-500"}`}>
                     {slot.key}
                   </span>
                 </button>
-                {weapon && <XpBar xp={weapon.xp} xpToNext={weapon.xpToNext} tone="weapon" className="w-12 sm:w-14" />}
+                {weapon && <XpBar xp={weapon.xp} xpToNext={weapon.xpToNext} tone="weapon" className="w-12 sm:w-14 compact:w-10!" />}
               </div>
             </div>
           );
@@ -124,7 +141,7 @@ export function HUD({ player, equippedWeapon, onOpenInventory, onSelectWeapon, o
         <button
           onClick={onUnequipWeapon}
           title="Unequip"
-          className={`pointer-events-auto ml-auto flex h-12 w-12 items-center justify-center rounded-md border-2 text-xs transition-all sm:h-14 sm:w-14 ${
+          className={`pointer-events-auto ml-auto flex h-12 w-12 items-center justify-center rounded-md border-2 text-xs transition-all sm:h-14 sm:w-14 compact:h-10! compact:w-10! compact:self-start! ${
             equippedWeapon === null
               ? "border-amber-400 bg-amber-700/90 text-stone-950 shadow-[0_0_14px_rgba(251,191,36,0.45)]"
               : "border-stone-700/70 bg-stone-950/85 text-stone-400 hover:border-stone-500 hover:text-stone-200"
@@ -143,7 +160,8 @@ export function HUD({ player, equippedWeapon, onOpenInventory, onSelectWeapon, o
           how many of that item the player actually has and disables
           itself at 0, rather than letting a click silently do
           nothing. */}
-      <div className="pointer-events-none fixed left-3 top-1/2 z-10 flex -translate-y-1/2 flex-col gap-2 sm:left-4 sm:gap-2.5">
+      {/* On touch screens (and short ones) they're a row under the player's plate, clear of the joystick. */}
+      <div className="pointer-events-none fixed left-3 top-1/2 z-10 flex -translate-y-1/2 flex-col gap-2 sm:left-4 sm:gap-2.5 compact:top-[7.25rem]! compact:left-2! compact:translate-y-0! compact:flex-row! compact:gap-2.5!">
         {player.inventory.slice(0, 3).map((entry) => {
           const strain = STRAINS[entry.strainId];
           if (!strain) return null;
@@ -154,7 +172,7 @@ export function HUD({ player, equippedWeapon, onOpenInventory, onSelectWeapon, o
               onClick={() => !disabled && onUseHealingLeaf(entry.strainId)}
               disabled={disabled}
               title={strain.effect.kind === "heal" ? `${strain.name} (heals ${strain.effect.amount})` : strain.name}
-              className={`group pointer-events-auto relative flex h-12 w-12 flex-col items-center justify-center rounded-md border-2 transition-all sm:h-14 sm:w-14 ${
+              className={`group pointer-events-auto relative flex h-12 w-12 flex-col items-center justify-center rounded-md border-2 transition-all sm:h-14 sm:w-14 compact:h-10! compact:w-10! ${
                 disabled
                   ? "cursor-not-allowed border-stone-800/60 bg-stone-950/60 text-stone-600"
                   : "border-emerald-700/70 bg-stone-950/85 text-stone-200 hover:border-emerald-400 hover:bg-emerald-950/40"

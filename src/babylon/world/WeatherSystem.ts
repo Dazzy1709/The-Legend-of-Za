@@ -60,9 +60,9 @@ const TRANSITION_WEIGHTS: Record<WeatherKind, Partial<Record<WeatherKind, number
   rain: { cloudy: 0.85, clear: 0.15 },
 };
 
-const MIN_HOLD_SECONDS = 50;
-const MAX_HOLD_SECONDS = 130;
-const TRANSITION_SECONDS = 14;
+const MIN_HOLD_SECONDS = 90;
+const MAX_HOLD_SECONDS = 220;
+const TRANSITION_SECONDS = 40; // weather eases in over most of a minute — no sudden darkening
 
 const RAIN_PARTICLE_CAPACITY = 4000;
 const RAIN_MAX_EMIT_RATE = 1800;
@@ -175,7 +175,9 @@ export class WeatherSystem {
 
     const fromPreset = WEATHER_PRESETS[this.current];
     const toPreset = WEATHER_PRESETS[this.transitioning ? this.next : this.current];
-    const t = this.transitioning ? this.transitionProgress : 0;
+    // Eased, so a change of weather starts and settles gently instead of at a constant rate.
+    const raw = this.transitioning ? this.transitionProgress : 0;
+    const t = raw * raw * (3 - 2 * raw);
 
     const sky: SkyWeatherParams = {
       turbidity: lerp(fromPreset.sky.turbidity, toPreset.sky.turbidity, t),

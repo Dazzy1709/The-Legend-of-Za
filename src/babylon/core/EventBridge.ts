@@ -6,6 +6,7 @@
 import type { WeaponKind, WorldPosition } from "../../types";
 import type { InteractableKind } from "../interaction/InteractableManager";
 import type { RideState } from "../vehicles/Budmobile";
+import type { MissionStatus } from "../story/MissionManager";
 import type { LevelUpEvent, ProgressionSnapshot, WeaponLevelUpEvent } from "../progression/Progression";
 
 export interface BridgeEvents {
@@ -42,6 +43,21 @@ export interface BridgeEvents {
   cutsceneChanged: { id: string | null; active: boolean; letterbox: boolean; skippable: boolean };
   /** The Budmobile: parked, being hopped on/off, or ridden — and whether the rider may hop off right now. */
   rideChanged: { state: RideState; canDismount: boolean };
+  /** The subtitle line during a cutscene, or null between lines. */
+  cutsceneCaption: { speaker: string | null; text: string } | null;
+  /** The story mission in progress and its current objective — null once the story is finished. */
+  missionChanged: MissionStatus | null;
+  /** The initial load (see LoadingTracker): how far along, rough seconds left, and whether it's done. */
+  loadingProgress: { fraction: number; secondsLeft: number | null; done: boolean };
+  /** A mission was just finished. */
+  /**
+   * A mission is done. `chapterEnd` marks the last one of its chapter (the
+   * big "Mission Passed", with the whole chapter's rewards in `chapterXp` /
+   * `chapterGold`); any other mission just gets a small toast.
+   */
+  missionCompleted: { title: string; chapter: string; xp: number; gold: number; chapterEnd: boolean; chapterXp: number; chapterGold: number };
+  /** Something worth saving just happened (rested, mission progress, level up). */
+  requestSave: { reason: string };
 }
 
 type Listener<K extends keyof BridgeEvents> = (payload: BridgeEvents[K]) => void;

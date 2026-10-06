@@ -8,6 +8,7 @@
 // happens to be playing.
 
 import { AssetContainer, Color3, Mesh, MeshBuilder, Scene, SceneLoader, StandardMaterial, TransformNode, Vector3 } from "@babylonjs/core";
+import { LoadingTracker } from "../core/LoadingTracker";
 import type { WeaponKind } from "../../types";
 import { WEAPONS_FOLDER } from "../../content/assetPaths";
 
@@ -155,7 +156,7 @@ function loadWeaponContainer(scene: Scene, file: string): Promise<AssetContainer
   }
   let promise = byFile.get(file);
   if (!promise) {
-    promise = SceneLoader.LoadAssetContainerAsync(WEAPONS_FOLDER, file, scene);
+    promise = LoadingTracker.for(scene).track((onProgress) => SceneLoader.LoadAssetContainerAsync(WEAPONS_FOLDER, file, scene, onProgress));
     byFile.set(file, promise);
   }
   return promise;

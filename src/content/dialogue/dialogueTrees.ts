@@ -1,5 +1,7 @@
 // src/content/dialogue/dialogueTrees.ts
-// Every conversation, keyed by the dialogueTreeId an NPC placement points at.
+// Every conversation, keyed by the dialogueTreeId an NPC placement points at
+// (the first talk) — plus the follow-ups dialogueTreeFor picks once the
+// story has moved on.
 
 import type { DialogueTree } from "../../types";
 
@@ -49,6 +51,65 @@ export const DIALOGUE_TREES: Record<string, DialogueTree> = {
         speaker: "Snoop Cordozar",
         text: "...That's exactly the kind of thing that gets people hurt, Clipper.",
         choices: [{ id: "end", text: "[End conversation]", nextNodeId: null }],
+      },
+    },
+  },
+  // Snoop, met already, while Chapter One is still running.
+  "snoop-again": {
+    npcId: "snoop",
+    startNodeId: "start",
+    nodes: {
+      start: {
+        id: "start",
+        speaker: "Snoop Cordozar",
+        text: "Still here, Zaza? Those debt collectors won't wait forever. Sort yourself out and get moving.",
+        choices: [
+          { id: "how", text: "Where do I start?", nextNodeId: "plan" },
+          { id: "on-it", text: "I'm on it.", nextNodeId: null },
+        ],
+      },
+      plan: {
+        id: "plan",
+        speaker: "Snoop Cordozar",
+        text:
+          "Rest up at your Safe House first, it'll keep you safe if things go wrong. Then take the Budmobile out the north gate. That's where they're camped.",
+        choices: [{ id: "end", text: "Got it.", nextNodeId: null }],
+      },
+    },
+  },
+  // Snoop, right as you report the collectors dealt with (the end of Chapter One).
+  "snoop-report": {
+    npcId: "snoop",
+    startNodeId: "start",
+    nodes: {
+      start: {
+        id: "start",
+        speaker: "Snoop Cordozar",
+        text: "Look at you, still standing. Word's already all over the market. The collectors are done.",
+        choices: [{ id: "end", text: "Told you I'd handle it.", nextNodeId: null, reputationDelta: { target: "cordozar", amount: 5 } }],
+      },
+    },
+  },
+  // Snoop after Chapter One.
+  "snoop-later": {
+    npcId: "snoop",
+    startNodeId: "start",
+    nodes: {
+      start: {
+        id: "start",
+        speaker: "Snoop Cordozar",
+        text: "Zaza! The market's been quiet since you dealt with those collectors. My father sends his thanks.",
+        choices: [
+          { id: "advice", text: "Any advice?", nextNodeId: "advice" },
+          { id: "bye", text: "Take care, Snoop.", nextNodeId: null },
+        ],
+      },
+      advice: {
+        id: "advice",
+        speaker: "Snoop Cordozar",
+        text:
+          "Whoever sent them will send someone tougher. Get yourself a real weapon at the store in the Handelsviertel and keep some healing on you.",
+        choices: [{ id: "end", text: "Will do.", nextNodeId: null }],
       },
     },
   },
@@ -205,3 +266,19 @@ export const DIALOGUE_TREES: Record<string, DialogueTree> = {
     },
   },
 };
+
+/**
+ * Which conversation an NPC has now: their first one (`firstTreeId`, from
+ * their placement) until it's been had, then a follow-up that fits the
+ * story so far. `hasFlag` reads story flags, including "talked:<treeId>"
+ * (recorded when a conversation opens).
+ */
+export function dialogueTreeFor(npcId: string, firstTreeId: string, hasFlag: (flag: string) => boolean): string {
+  if (!hasFlag(`talked:${firstTreeId}`)) return firstTreeId;
+  if (npcId === "snoop") {
+    if (!hasFlag("chapter-1-complete")) return "snoop-again";
+    if (!hasFlag("talked:snoop-report")) return "snoop-report";
+    return "snoop-later";
+  }
+  return firstTreeId;
+}

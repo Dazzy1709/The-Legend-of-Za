@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local game-server data (accounts, saves) — never commit
+server/data/

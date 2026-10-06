@@ -8,18 +8,20 @@ export interface LevelUpNotice {
   title: string;
   lines: string[];
   /** Character level-ups are green, weapon level-ups gold, resting at the safe house blue. */
-  tone: "level" | "weapon" | "rest";
+  tone: "level" | "weapon" | "rest" | "mission";
 }
 
 const TONE_BOX: Record<LevelUpNotice["tone"], string> = {
   level: "border-emerald-500/60 bg-emerald-950/85",
   weapon: "border-amber-500/60 bg-amber-950/85",
   rest: "border-sky-400/60 bg-sky-950/85",
+  mission: "border-amber-400/70 bg-stone-950/90",
 };
 const TONE_TITLE: Record<LevelUpNotice["tone"], string> = {
   level: "text-emerald-200",
   weapon: "text-amber-200",
   rest: "text-sky-200",
+  mission: "text-amber-200",
 };
 
 export function LevelUpBanner({ notices }: { notices: LevelUpNotice[] }) {

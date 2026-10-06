@@ -56,7 +56,7 @@ export function ShopPanel({ player, onBuyStrain, onClose }: ShopPanelProps) {
           </div>
         )}
 
-        <div className="max-h-[60vh] overflow-y-auto divide-y divide-stone-800">
+        <div className="max-h-[60dvh] overflow-y-auto divide-y divide-stone-800">
           {SHOP_STRAIN_IDS.map((strainId) => {
             const strain = STRAINS[strainId];
             const price = STRAIN_PRICES[strainId];

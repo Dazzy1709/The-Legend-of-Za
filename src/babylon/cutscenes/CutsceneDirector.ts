@@ -6,31 +6,11 @@
 // jump. While one plays, GameEngine keeps player input off and React
 // hides the HUD (the cutsceneChanged event).
 
-import { ArcRotateCamera, Vector3 } from "@babylonjs/core";
+import { ArcRotateCamera } from "@babylonjs/core";
 import type { EventBridge } from "../core/EventBridge";
+import type { CutsceneCaption, CutsceneDefinition, CutsceneEvent, OrbitPose } from "./types";
 
-/** An ArcRotateCamera pose: angles and distance around a look-at point. */
-export interface OrbitPose {
-  alpha: number;
-  beta: number;
-  radius: number;
-  target: Vector3;
-}
-
-export interface CutsceneDefinition {
-  id: string;
-  durationSeconds: number;
-  /** Black bars top and bottom. */
-  letterbox: boolean;
-  /** Space / Enter / Escape jumps to the end. */
-  skippable: boolean;
-  /**
-   * The camera at `t` (0 at the start, 1 at the end). `end` is the
-   * gameplay camera the cutscene hands over to; returning exactly `end`
-   * at t = 1 (with motion easing to a stop) makes the handover seamless.
-   */
-  camera: (t: number, end: OrbitPose) => OrbitPose;
-}
+export type { CutsceneCaption, CutsceneDefinition, CutsceneEvent, OrbitPose } from "./types";
 
 /** Longest step a single frame may advance a cutscene, so a loading hitch doesn't skip half of it. */
 const MAX_STEP_SECONDS = 1 / 30;
@@ -41,10 +21,18 @@ export class CutsceneDirector {
   private elapsed = 0;
   private running = false;
   private onFinished: (() => void) | null = null;
+  private caption: CutsceneCaption | null = null;
+  /** Events not fired yet in the current cutscene. */
+  private pendingEvents: CutsceneEvent[] = [];
   /** The camera's zoom/tilt limits, lifted while a cutscene plays (a shot can go far beyond gameplay's range) and put back after. */
   private savedLimits: { lowerRadius: number | null; upperRadius: number | null; lowerBeta: number | null; upperBeta: number | null } | null = null;
 
-  constructor(private camera: ArcRotateCamera, private bridge: EventBridge) {}
+  constructor(
+    private camera: ArcRotateCamera,
+    private bridge: EventBridge,
+    /** Carries out timeline events (GameEngine knows how to fade, play sounds, set flags...). */
+    private onEvent: (event: CutsceneEvent) => void = () => {}
+  ) {}
 
   isActive(): boolean {
     return this.current !== null;
@@ -59,6 +47,7 @@ export class CutsceneDirector {
     this.current = def;
     this.end = { ...end, target: end.target.clone() };
     this.elapsed = 0;
+    this.pendingEvents = [...(def.events ?? [])].sort((a, b) => a.at - b.at);
     this.running = false;
     this.onFinished = onFinished ?? null;
     if (!this.savedLimits) {
@@ -85,6 +74,8 @@ export class CutsceneDirector {
     if (!this.current || !this.end || !this.running) return;
     this.elapsed += Math.min(dt, MAX_STEP_SECONDS);
     const t = Math.min(1, this.elapsed / this.current.durationSeconds);
+    this.updateCaption();
+    this.fireEvents(this.elapsed);
     if (t >= 1) {
       this.finish();
       return;
@@ -95,6 +86,9 @@ export class CutsceneDirector {
   private finish() {
     if (!this.current || !this.end) return;
     this.apply(this.end);
+    this.setCaption(null);
+    // Skipped: events still due happen now, so a skip can't lose a story flag (or leave the screen faded).
+    this.fireEvents(Infinity);
     if (this.savedLimits) {
       const c = this.camera;
       c.lowerRadiusLimit = this.savedLimits.lowerRadius;
@@ -110,6 +104,21 @@ export class CutsceneDirector {
     const done = this.onFinished;
     this.onFinished = null;
     done?.();
+  }
+
+  private fireEvents(upTo: number) {
+    while (this.pendingEvents.length > 0 && this.pendingEvents[0].at <= upTo) this.onEvent(this.pendingEvents.shift()!);
+  }
+
+  private updateCaption() {
+    const now = this.elapsed;
+    const line = this.current?.captions?.find((c) => now >= c.from && now < c.to) ?? null;
+    if (line !== this.caption) this.setCaption(line);
+  }
+
+  private setCaption(line: CutsceneCaption | null) {
+    this.caption = line;
+    this.bridge.emit("cutsceneCaption", line ? { speaker: line.speaker ?? null, text: line.text } : null);
   }
 
   private apply(pose: OrbitPose) {

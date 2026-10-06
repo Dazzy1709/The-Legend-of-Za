@@ -17,11 +17,13 @@ import {
   StandardMaterial,
   Vector3,
 } from "@babylonjs/core";
-import { CityBuilder, CITY_SPAN } from "../world/CityBuilder";
+import { QUALITY, markLoadSettled, markLoadStarted } from "./Quality";
+import { CityBuilder, CITY_SPAN, WALL_RADIUS } from "../world/CityBuilder";
 import { CrowdManager } from "../characters/CrowdManager";
 import { ADEL_RING_OUTER_RADIUS } from "../world/Districts";
 import { DistrictTracker } from "../world/DistrictTracker";
 import { DoorstepGreeterManager } from "../characters/DoorStepGreeterManager";
+import { LoadingTracker } from "./LoadingTracker";
 import { EventBridge } from "./EventBridge";
 // Side-effect import — registers createDefaultEnvironment() and its sibling
 // helpers onto Scene. This is a `declare module` augmentation, not part of
@@ -40,10 +42,11 @@ import type { StatName } from "../../types";
 import { PlayerController } from "../player/PlayerController";
 import { SkyBuilder } from "../world/SkyBuilder";
 import { WeatherSystem } from "../world/WeatherSystem";
-import { CITY_RADIUS, MOUNTAIN_BASE, sampleTerrainHeight, TerrainBuilder } from "../world/TerrainBuilder";
+import { sampleTerrainHeight, TerrainBuilder } from "../world/TerrainBuilder";
 import { createWaterTexture } from "../world/TextureFactory";
 import { VegetationBuilder } from "../world/VegetationBuilder";
-import { GrassBuilder } from "../world/GrassBuilder";
+import { WildsBuilder } from "../world/WildsBuilder";
+import { GrassBuilder, MeadowGrass } from "../world/GrassBuilder";
 import type { WeaponKind } from "../combat/Weapons";
 import { LAKE_CENTER, LAKE_RADIUS } from "../../content/cities/kushtar/placements";
 import { getCity, STARTING_CITY_ID } from "../../content/cities";
@@ -51,8 +54,29 @@ import type { CityDefinition } from "../../content/cities/cityTypes";
 import type { WorldPosition } from "../../types";
 import { InteractableManager } from "../interaction/InteractableManager";
 import { CutsceneDirector } from "../cutscenes/CutsceneDirector";
-import { INTRO_CUTSCENE } from "../../content/cutscenes/intro";
+import type { CutsceneEvent } from "../cutscenes/types";
+import { CUTSCENES, type CutsceneId } from "../../content/cutscenes";
+import type { SaveGame } from "../../../shared/save";
+import { MissionManager, type MissionStatus } from "../story/MissionManager";
+import { StatsTracker } from "../progression/StatsTracker";
+
+/** Everything the engine itself keeps in a save (the UI adds gold, items, weapons and reputation). */
+export type EngineState = Pick<SaveGame, "progression" | "vehicles" | "world" | "stats"> & {
+  player: Omit<SaveGame["player"], "gold" | "equippedWeapon" | "ownedWeapons">;
+  story: Omit<SaveGame["story"], "reputation">;
+};
+
+export interface GameEngineOptions {
+  /** Continue from this save (null/undefined: a new game). */
+  save?: SaveGame | null;
+  /**
+   * Picking up after a page refresh: skip the opening shot and fade straight
+   * in where the player was (a mission cutscene that was cut off still replays).
+   */
+  resume?: boolean;
+}
 import { SoundManager } from "../audio/SoundManager";
+import { SpeechBubbles } from "../speech/SpeechBubbles";
 import { Budmobile, BUDMOBILE_INTERACT_RADIUS } from "../vehicles/Budmobile";
 import { BUDMOBILE } from "../../content/vehicles/vehicles";
 
@@ -63,10 +87,14 @@ const FADE_OUT_MS = 450;
 const FADE_IN_MS = 600;
 /** Time spent "asleep" in the dark at a safe house. */
 const REST_DARK_MS = 700;
-/** The world settles (models load) for this long after the scene is ready before the intro starts moving. */
-const INTRO_START_DELAY_MS = 600;
+/** A short beat after everything has loaded before the intro starts moving. */
+const INTRO_START_DELAY_MS = 300;
+/** Play starts by this point even if something never finishes loading (a slow phone, a stuck file). */
+const LOAD_MAX_WAIT_MS = 60_000;
+/** How often the loading screen hears how far the load has got. */
+const LOADING_REPORT_MS = 150;
 
-const DAY_LENGTH_SECONDS = 240; // one full day/night cycle, tuned for a short play session
+const DAY_LENGTH_SECONDS = 600; // one full day/night cycle — slow enough that the light drifts rather than visibly sweeps
 const GROUND_OFFSET = 1;
 
 function districtCrowdSeed(n: number): number {
@@ -155,11 +183,13 @@ export class GameEngine {
   private goldManager!: GoldManager;
   private progression!: ProgressionSystem;
   private grass: GrassBuilder;
+  private meadowGrass: MeadowGrass;
   private crowdManagers: CrowdManager[] = [];
   private doorstepGreeters: DoorstepGreeterManager;
   private districtTracker: DistrictTracker;
   private city: CityBuilder;
   private vegetation: VegetationBuilder;
+  private wilds: WildsBuilder;
   private sky: SkyBuilder;
   private weather: WeatherSystem;
   private ambient: HemisphericLight;
@@ -176,6 +206,7 @@ export class GameEngine {
   private disposed = false;
   private sounds = new SoundManager();
   private budmobile!: Budmobile;
+  private speech!: SpeechBubbles;
   /** Player input is on only when nothing is holding it off: */
   private inputEnabled = true;
   /** — a menu/dialogue/overlay in React, */
@@ -187,9 +218,18 @@ export class GameEngine {
   private static readonly ENEMY_HEALTHBAR_AIM_RANGE = 70;
   private static readonly ENEMY_HEALTHBAR_AFTER_HIT_SECONDS = 4;
   private static readonly POSITION_SYNC_INTERVAL = 0.1; // throttle React updates to ~10/sec
-  private static readonly BASE_FOG_DENSITY = 0.0042; // was 0.005 — reduced for a clearer, more impressive distant view of the skyline/mountains rather than them washing out into haze so soon. Weather multiplies this (see updateDayNightCycle), rather than each spot hardcoding its own copy of the base value.
+  /**
+   * Atmospheric haze. Plain exponential (not squared) fog: it fades the
+   * middle distance gently and keeps going, so far hills and the mountain
+   * ring stay visible as soft silhouettes instead of vanishing — the
+   * Skyrim view. Weather multiplies it (see updateDayNightCycle).
+   */
+  private static readonly BASE_FOG_DENSITY = 0.0019;
 
-  constructor(canvas: HTMLCanvasElement) {
+  private missions!: MissionManager;
+  private stats!: StatsTracker;
+
+  constructor(canvas: HTMLCanvasElement, options: GameEngineOptions = {}) {
     // Suppresses Babylon's own internal warning-level logging (kept:
     // error-level, still worth seeing) — specifically found to matter
     // because retargetAnimationGroup logs one warning line PER missing
@@ -207,7 +247,10 @@ export class GameEngine {
     // logging at this volume is worth eliminating on its own.
     Logger.LogLevels = Logger.ErrorLogLevel;
     this.bridge = new EventBridge();
+    markLoadStarted(); // see Quality.ts — a crash from here on makes the next start lighter
     this.engine = new Engine(canvas, true, { stencil: true, antialias: true });
+    // Phones: image textures load at most this big (Babylon scales larger ones down) — see Quality.ts.
+    if (QUALITY.maxTextureSize > 0) this.engine.getCaps().maxTextureSize = Math.min(this.engine.getCaps().maxTextureSize, QUALITY.maxTextureSize);
     this.scene = new Scene(this.engine);
     this.scene.collisionsEnabled = true;
     // Babylon ray-picks the whole scene on every pointer move by default
@@ -215,7 +258,7 @@ export class GameEngine {
     // mouse movement that was a full-scene raycast per mouse event.
     this.scene.skipPointerMovePicking = true;
     this.scene.clearColor = new Color4(0.53, 0.7, 0.85, 1);
-    this.scene.fogMode = Scene.FOGMODE_EXP2;
+    this.scene.fogMode = Scene.FOGMODE_EXP;
     this.scene.fogDensity = GameEngine.BASE_FOG_DENSITY;
     this.scene.fogColor = new Color3(0.6, 0.72, 0.8);
 
@@ -223,8 +266,8 @@ export class GameEngine {
     this.ambient.intensity = 0.65;
     // Sky light from above, warm earthy bounce from below — gives shaded
     // sides depth and colour instead of a flat grey.
-    this.ambient.diffuse = new Color3(0.78, 0.86, 1);
-    this.ambient.groundColor = new Color3(0.42, 0.36, 0.3);
+    this.ambient.diffuse = new Color3(0.9, 0.92, 1);
+    this.ambient.groundColor = new Color3(0.48, 0.42, 0.34);
     this.ambient.specular = Color3.Black();
     this.sun = new DirectionalLight("sun", new Vector3(-0.5, -1, -0.3), this.scene);
     this.sun.intensity = 1.5;
@@ -258,10 +301,10 @@ export class GameEngine {
     // per world-unit is already much higher than before even at the old
     // size; the bump makes edges crisper still rather than leaving that
     // headroom unused.
-    this.shadowGenerator = new ShadowGenerator(1024, this.sun); // was 2048 — a real, ongoing per-frame cost (this re-renders for every shadow caster, every frame — currently ~60+ NPCs/enemies plus buildings), not just a one-time load cost. 1024 is still enough resolution at this camera distance; 2048 was 4x the memory/fill-rate cost for a difference that's hard to see in practice.
+    this.shadowGenerator = new ShadowGenerator(QUALITY.shadowMapSize, this.sun); // was 2048 — a real, ongoing per-frame cost (this re-renders for every shadow caster, every frame — currently ~60+ NPCs/enemies plus buildings), not just a one-time load cost. 1024 is still enough resolution at this camera distance; 2048 was 4x the memory/fill-rate cost for a difference that's hard to see in practice.
     this.shadowGenerator.useBlurExponentialShadowMap = true;
-    this.shadowGenerator.blurKernel = 28; // was 48 — blur cost scales with kernel size, and combined with the larger map size above this was doing much more blur work than the visual softness actually needed
-    this.shadowGenerator.darkness = 0.35; // shadows lighten rather than go near-black — part of the same brighter, softer, less realistic-gritty look
+    this.shadowGenerator.blurKernel = 36; // soft-edged shadows (TF2-style), not crisp ones
+    this.shadowGenerator.darkness = 0.5; // shadows are a soft shade, never near-black
 
     // PBRMaterial (used for the real photographed textures in CityBuilder —
     // asphalt roads, grass squares) relies on environment/IBL lighting for
@@ -304,8 +347,8 @@ export class GameEngine {
     this.respawnPoint = this.cityDef.spawnPoint;
     this.city = new CityBuilder(this.scene, this.cityDef.buildings, this.shadowGenerator);
     const parkSpots = this.city.getParkPositions().map((p) => ({ x: p.x, z: p.z, scale: 1 }));
-    const outskirtsSpots = VegetationBuilder.generateBandSpots(CITY_RADIUS + 8, MOUNTAIN_BASE - 6, 12);
-    this.vegetation = new VegetationBuilder(this.scene, [...outskirtsSpots, ...parkSpots]);
+    this.vegetation = new VegetationBuilder(this.scene, parkSpots); // trees in the city's parks
+    this.wilds = new WildsBuilder(this.scene, this.shadowGenerator); // forests, rocks and scrub outside the walls
     // Grass confined to the pavement/lawn of almost every building,
     // excluding Adelsviertel — replaces the previous outskirts-belt and
     // farm-district scatters entirely, per "only be on the pavement...
@@ -321,13 +364,17 @@ export class GameEngine {
     // lawns get grass, not just a denser version of the same ~88%).
     const buildingGrassSpots = GrassBuilder.generateGrassSpotsAroundPoints(lawnSpots, 8, 4.5, 0.97);
     this.grass = new GrassBuilder(this.scene, buildingGrassSpots);
+    this.meadowGrass = new MeadowGrass(this.scene, WALL_RADIUS + 6); // grass across the wilds, around the player
     this.buildLake();
 
     // Bloom in the post-process pipeline (below) picks up whatever a
     // GlowLayer marks as emissive — this is what makes lit windows actually
     // glow at night instead of just being a bright flat patch.
-    const glow = new GlowLayer("cityGlow", this.scene);
-    glow.intensity = 0.6;
+    // (Not on phones — it renders the scene again every frame; see Quality.ts.)
+    if (QUALITY.glowLayer) {
+      const glow = new GlowLayer("cityGlow", this.scene);
+      glow.intensity = 0.6;
+    }
 
     const spawn = this.cityDef.spawnPoint;
     this.player = new PlayerController(this.scene, canvas, new Vector3(spawn.x, sampleTerrainHeight(spawn.x, spawn.z) + GROUND_OFFSET, spawn.z));
@@ -347,30 +394,36 @@ export class GameEngine {
     // swing that connects), so this is the one place that needs to
     // know about it, not PlayerController's own attack code.
     this.bridge.on("enemyDamaged", () => this.player.triggerHitShake());
+    // Speech bubbles — enemy barks now; anyone can talk through it later.
+    this.speech = new SpeechBubbles(this.scene, () => this.scene.activeCamera);
     this.enemyManager = new EnemyManager(
       this.scene,
       this.combatManager,
       () => this.player.getPosition(),
       this.player,
-      this.shadowGenerator
+      this.shadowGenerator,
+      this.speech
     );
     this.player.setCombatSystems(this.combatManager, this.bridge, () => this.enemyManager.getAllAsCombatants());
 
     // Leveling: the player's level, stats and weapon levels. Enemies are
-    // always ENEMY_LEVEL_OFFSET levels above the player, so they're
+    // always 1-2 levels above the player (ENEMY_LEVEL_ABOVE), so they're
     // re-leveled whenever the player's level changes.
     this.progression = new ProgressionSystem(this.bridge);
     this.player.setProgression(this.progression);
-    this.enemyManager.setEnemyLevel(this.progression.getEnemyLevel());
+    this.enemyManager.setPlayerLevel(this.progression.getLevel());
     this.bridge.on("enemyDied", ({ level, killedByPlayer, weapon }) => {
       // Kills are the main XP source — the weapon that landed the blow gets the same XP.
       if (killedByPlayer) this.progression.grantXp(killXp(level), weapon);
     });
     this.bridge.on("progressionChanged", () => {
       this.player.refreshMaxHealth(); // level-ups and endurance buffs change max health
-      this.enemyManager.setEnemyLevel(this.progression.getEnemyLevel());
+      this.enemyManager.setPlayerLevel(this.progression.getLevel());
     });
-    this.bridge.on("levelUp", () => playLevelUpEffect(this.scene, () => this.player.getPosition()));
+    this.bridge.on("levelUp", () => {
+      playLevelUpEffect(this.scene, () => this.player.getPosition());
+      this.bridge.emit("requestSave", { reason: "level-up" });
+    });
     this.bridge.on("weaponLevelUp", () =>
       playLevelUpEffect(this.scene, () => this.player.getPosition(), new Color3(1, 0.85, 0.45))
     );
@@ -466,18 +519,24 @@ export class GameEngine {
 
     this.freezeStaticMeshes();
     this.createBudmobile();
+    this.stats = new StatsTracker(this.bridge);
+    this.createMissions();
     this.setupPostProcessing();
     this.setupWeaponWheelToggle();
     this.setupLockOnToggle();
-    this.cutscenes = new CutsceneDirector(this.player.camera, this.bridge);
+    this.cutscenes = new CutsceneDirector(this.player.camera, this.bridge, (event) => this.handleCutsceneEvent(event));
     this.setupCutsceneSkip();
-    this.playLoadIn(true);
+    if (options.save) this.applySave(options.save);
+    // The story starts (or picks up) once the opening shot has settled.
+    if (options.resume) this.fadeInWhenReady(() => this.missions.beginStory());
+    else this.playLoadIn(true, () => this.missions.beginStory());
 
     this.engine.runRenderLoop(() => {
       const dt = this.engine.getDeltaTime() / 1000;
       this.elapsed += dt;
       this.updateDayNightCycle(dt);
       this.progression.update(dt);
+      this.stats.update(dt);
       this.budmobile.update(dt); // before the player, who is placed on it
       this.player.update(dt);
       try {
@@ -500,7 +559,9 @@ export class GameEngine {
       this.crowdManagers.forEach((c) => c.update(dt, playerPos));
       this.doorstepGreeters.update(dt, playerPos);
       this.grass.update(playerPos);
+      this.meadowGrass.update(playerPos);
       this.vegetation.update(dt);
+      this.wilds.update(dt, playerPos, this.player.camera.globalPosition);
       this.districtTracker.update(dt);
       this.syncPositionToReact(dt);
       this.syncAimingToReact();
@@ -577,23 +638,64 @@ export class GameEngine {
    * HUD) come back only once the camera is exactly in place.
    * `waitForWorld` holds it until the scene has finished loading.
    */
-  private playLoadIn(waitForWorld: boolean) {
+  private playLoadIn(waitForWorld: boolean, then?: () => void) {
     this.setSequenceRunning(true);
     this.player.setCameraOverride(true);
     const end = this.player.getCameraRestPose();
-    this.cutscenes.prepare(INTRO_CUTSCENE, end, () => {
+    this.cutscenes.prepare(CUTSCENES.loadIn, end, () => {
       this.player.setCameraOverride(false);
       this.setSequenceRunning(false);
       // Skipped before it began? The black still has to clear.
       this.bridge.emit("screenFade", { opacity: 0, durationMs: 400 });
+      then?.();
     });
     const start = () => {
       if (this.disposed) return;
       this.bridge.emit("screenFade", { opacity: 0, durationMs: 1200 });
       this.cutscenes.begin();
     };
-    if (waitForWorld) this.scene.executeWhenReady(() => setTimeout(start, INTRO_START_DELAY_MS));
+    if (waitForWorld) this.whenLoaded(() => setTimeout(start, INTRO_START_DELAY_MS));
     else setTimeout(start, 150);
+  }
+
+  /** Resuming after a refresh: no opening shot — the camera starts behind the player and the black lifts once the world has loaded. */
+  private fadeInWhenReady(then: () => void) {
+    this.setSequenceRunning(true);
+    let started = false;
+    const start = () =>
+      setTimeout(() => {
+        if (this.disposed || started) return;
+        started = true;
+        const pose = this.player.getCameraRestPose();
+        const camera = this.player.camera;
+        camera.alpha = pose.alpha;
+        camera.beta = pose.beta;
+        camera.radius = pose.radius;
+        camera.setTarget(pose.target, false, false, true); // keep the angles just set
+        this.setSequenceRunning(false);
+        this.bridge.emit("screenFade", { opacity: 0, durationMs: 700 });
+        then();
+      }, INTRO_START_DELAY_MS);
+    this.whenLoaded(start);
+  }
+
+  /**
+   * Calls `then` once the world and every model in it have loaded (or
+   * LOAD_MAX_WAIT_MS has passed), reporting progress to the loading screen
+   * meanwhile.
+   */
+  private whenLoaded(then: () => void) {
+    const tracker = LoadingTracker.for(this.scene);
+    const report = setInterval(() => {
+      if (this.disposed) return clearInterval(report);
+      this.bridge.emit("loadingProgress", { ...tracker.progress(), done: false });
+    }, LOADING_REPORT_MS);
+    tracker.whenDone(() => {
+      clearInterval(report);
+      markLoadSettled();
+      this.bridge.emit("loadingProgress", { fraction: 1, secondsLeft: 0, done: true });
+      then();
+    }, LOAD_MAX_WAIT_MS);
   }
 
   /** Space / Enter / Escape skip a skippable cutscene. */
@@ -603,6 +705,134 @@ export class GameEngine {
       const key = kbInfo.event.key;
       if (key === " " || key === "Enter" || key === "Escape") this.cutscenes.skip();
     });
+  }
+
+  /**
+   * Plays a story cutscene, ending on the camera behind the player; input
+   * is off while it runs. If another sequence (a rest, the death screen,
+   * another cutscene) is running, it waits for that to finish first.
+   */
+  playCutscene(id: CutsceneId, done?: () => void) {
+    if (this.disposed) return;
+    if (this.sequenceRunning || this.cutscenes.isActive() || this.player.isDead()) {
+      setTimeout(() => this.playCutscene(id, done), 400);
+      return;
+    }
+    this.budmobile.forceDismount();
+    this.setSequenceRunning(true);
+    this.player.setCameraOverride(true);
+    this.cutscenes.prepare(CUTSCENES[id], this.player.getCameraRestPose(), () => {
+      this.player.setCameraOverride(false);
+      this.setSequenceRunning(false);
+      done?.();
+    });
+    this.cutscenes.begin();
+  }
+
+  /** Carries out a cutscene's timeline event (see babylon/cutscenes/types.ts for the kinds). */
+  private handleCutsceneEvent(event: CutsceneEvent) {
+    switch (event.type) {
+      case "fade":
+        this.bridge.emit("screenFade", { opacity: event.opacity, durationMs: event.durationMs });
+        break;
+      case "sound":
+        this.sounds.play(event.soundId);
+        break;
+      case "flag":
+        this.missions.addFlag(event.flag);
+        break;
+      case "say": {
+        const npc = this.cityDef.npcs.find((n) => n.id === event.npcId);
+        if (!npc) break;
+        const at = new Vector3(npc.position.x, sampleTerrainHeight(npc.position.x, npc.position.z), npc.position.z);
+        this.speech.say(`npc-${npc.id}`, () => at, event.text, { seconds: event.seconds ?? 3, heightAbove: 2.6 });
+        break;
+      }
+    }
+  }
+
+  /** Story mode: missions, their objectives and cutscenes. */
+  private createMissions() {
+    this.missions = new MissionManager(this.bridge, {
+      grantXp: (amount) => this.progression.grantXp(amount),
+      grantGold: (amount) => this.bridge.emit("goldChanged", amount),
+      playCutscene: (id, done) => this.playCutscene(id, done),
+      npcPosition: (npcId) => this.cityDef.npcs.find((n) => n.id === npcId)?.position ?? null,
+      safeHousePosition: () => this.cityDef.safeHouses[0]?.door ?? null,
+      vehiclePosition: () => {
+        const p = this.budmobile.getPosition();
+        return { x: p.x, z: p.z };
+      },
+    });
+  }
+
+  /** Records a story flag (saved with the game). */
+  addStoryFlag(flag: string) {
+    this.missions.addFlag(flag);
+  }
+
+  /** Whether the story has recorded `flag` (e.g. "chapter-1-complete"). */
+  hasStoryFlag(flag: string): boolean {
+    return this.missions.hasFlag(flag);
+  }
+
+  getMissionStatus(): MissionStatus | null {
+    return this.missions.getStatus();
+  }
+
+  /** Where the current objective is (minimap marker), or null. */
+  getObjectiveMarker(): { x: number; z: number } | null {
+    return this.missions.getObjectiveMarker();
+  }
+
+  // ---------- Saving ----------
+
+  /** The engine's part of a save — see EngineState. */
+  exportState(): EngineState {
+    // Saved while dead: you'll be back at the respawn point. While riding: standing beside the Budmobile.
+    let at = this.player.getPosition();
+    const bud = this.budmobile.getPose();
+    if (this.player.isDead()) at = new Vector3(this.respawnPoint.x, 0, this.respawnPoint.z);
+    else if (this.budmobile.hasRider()) at = new Vector3(bud.x - Math.sin(bud.yaw) * 2.8, 0, bud.z - Math.cos(bud.yaw) * 2.8);
+    return {
+      player: {
+        cityId: this.cityDef.id,
+        x: at.x,
+        z: at.z,
+        facing: this.player.getFacingYaw(),
+        health: this.player.isDead() ? this.player.getMaxHealth() : this.player.getCurrentHealth(),
+        respawn: { ...this.respawnPoint },
+      },
+      progression: this.progression.exportState(),
+      story: this.missions.exportState(),
+      vehicles: { budmobile: bud },
+      world: { clock: this.elapsed },
+      stats: this.stats.exportState(),
+    };
+  }
+
+  /** Puts the world back the way a save left it. Called once, before the opening shot. */
+  private applySave(save: SaveGame) {
+    this.progression.importState(save.progression);
+    this.player.refreshMaxHealth();
+    this.enemyManager.setPlayerLevel(this.progression.getLevel());
+    this.respawnPoint = { ...save.player.respawn };
+    this.player.restoreState(save.player.x, save.player.z, save.player.facing, save.player.health);
+    const bud = save.vehicles.budmobile;
+    if (bud) this.budmobile.setPose(bud);
+    this.elapsed = save.world.clock ?? 0;
+    this.stats.importState(save.stats);
+    this.missions.importState(save.story);
+  }
+
+  /** Player settings (services/settings): look speed, inverted look, volume. */
+  applySettings(settings: { lookSensitivity: number; invertLookY: boolean; masterVolume: number }) {
+    this.player.setLookSettings(settings.lookSensitivity, settings.invertLookY);
+    this.sounds.setMasterVolume(settings.masterVolume);
+  }
+
+  isCutscenePlaying(): boolean {
+    return this.cutscenes.isActive();
   }
 
   /** Skips the cutscene that's playing, if it allows it (the touch "Skip" button). */
@@ -626,7 +856,10 @@ export class GameEngine {
     await this.wait(REST_DARK_MS);
     if (this.disposed) return;
     this.bridge.emit("screenFade", { opacity: 0, durationMs: FADE_IN_MS });
+    // Resting is saving: you'll come back here if you die.
+    this.respawnPoint = { ...house.door };
     this.bridge.emit("safeHouseRested", { name: house.name });
+    this.bridge.emit("requestSave", { reason: "rest" });
     await this.wait(FADE_IN_MS * 0.5);
     if (this.disposed) return;
     this.setSequenceRunning(false);
@@ -820,8 +1053,10 @@ export class GameEngine {
 
   dispose() {
     this.disposed = true;
+    markLoadSettled(0); // closed normally (back to the menu) — not a crash
     this.sounds.dispose();
     this.budmobile?.dispose();
+    this.speech?.dispose();
     window.removeEventListener("resize", this.handleResize);
     this.player.dispose();
     this.enemyManager.dispose();
@@ -832,39 +1067,40 @@ export class GameEngine {
   }
 
   /**
-   * The look: a Skyrim-like natural, filmic grade rather than the old
-   * bright stylised one — all of it inside the one image-processing pass
-   * the pipeline already runs, so it costs nothing extra per frame.
-   *  - ACES filmic tone mapping: bright skies and sunlit stone roll off
-   *    softly instead of clipping, and darks keep their depth.
-   *  - Natural colour: much less saturation boost, more contrast, cool
-   *    blue in the shadows and warm gold in the highlights.
-   *  - Softer bloom, only on things that are genuinely bright (the sun,
-   *    lit windows, signs), and a light vignette.
+   * The look: soft, painterly light in the spirit of Team Fortress 2 —
+   * gentle contrast, calm (not punchy) colour, warm light against cool
+   * shade — all inside the one image-processing pass the pipeline already
+   * runs, so it costs nothing extra per frame.
+   *  - Neutral filmic tone mapping (KHR PBR Neutral): highlights roll off
+   *    softly without the saturation/contrast push ACES adds.
+   *  - Exposure and saturation held back so it never looks over-bright.
+   *  - Softer bloom, only on genuinely bright things, and a light vignette.
    */
   private setupPostProcessing() {
-    const pipeline = new DefaultRenderingPipeline("defaultPipeline", true, this.scene, [this.player.camera]);
+    // Phones skip the HDR buffer, bloom and sharpening (memory and GPU time — see Quality.ts); the colour grading below stays.
+    const fancy = QUALITY.fancyPostProcessing;
+    const pipeline = new DefaultRenderingPipeline("defaultPipeline", fancy, this.scene, [this.player.camera]);
     pipeline.fxaaEnabled = false; // the engine's own hardware antialiasing already covers it
-    pipeline.bloomEnabled = true;
-    pipeline.bloomThreshold = 0.72;
-    pipeline.bloomWeight = 0.28;
+    pipeline.bloomEnabled = fancy;
+    pipeline.bloomThreshold = 0.78;
+    pipeline.bloomWeight = 0.22;
     pipeline.bloomKernel = 32;
     pipeline.bloomScale = 0.5;
-    pipeline.sharpenEnabled = true;
-    pipeline.sharpen.edgeAmount = 0.22;
+    pipeline.sharpenEnabled = fancy;
+    pipeline.sharpen.edgeAmount = 0.12;
     const ip = pipeline.imageProcessing;
     ip.toneMappingEnabled = true;
-    ip.toneMappingType = ImageProcessingConfiguration.TONEMAPPING_ACES;
-    ip.exposure = 1.45;
-    ip.contrast = 1.32;
+    ip.toneMappingType = ImageProcessingConfiguration.TONEMAPPING_KHR_PBR_NEUTRAL;
+    ip.exposure = 1.05;
+    ip.contrast = 1.08;
     const curves = new ColorCurves();
-    curves.globalSaturation = 6;
-    curves.shadowsHue = 215; // cool, blue-grey shadows
-    curves.shadowsDensity = 22;
-    curves.shadowsSaturation = 12;
-    curves.highlightsHue = 38; // warm, golden light
-    curves.highlightsDensity = 16;
-    curves.highlightsSaturation = 8;
+    curves.globalSaturation = -12;
+    curves.shadowsHue = 220; // a hint of cool in the shade
+    curves.shadowsDensity = 8;
+    curves.shadowsSaturation = 4;
+    curves.highlightsHue = 35; // warm light
+    curves.highlightsDensity = 14;
+    curves.highlightsSaturation = 6;
     ip.colorCurvesEnabled = true;
     ip.colorCurves = curves;
     pipeline.imageProcessing.vignetteEnabled = true;
@@ -886,6 +1122,8 @@ export class GameEngine {
       name.startsWith("player-") ||
       name.startsWith("tree-canopy") || // sways in the wind
       name === "skyDome" ||
+      name.startsWith("wilds-collider") || // moved onto the trees nearest the player
+      name.startsWith("budmobile") ||
       name === "cloudLayer" ||
       name === "sunDisc";
     for (const mesh of this.scene.meshes) {
@@ -939,8 +1177,11 @@ export class GameEngine {
     // Weather dims the same day/night intensities rather than replacing
     // them — noon under a storm is still meaningfully brighter than
     // midnight under the same storm, just dimmer than a clear noon.
-    this.ambient.intensity = (0.22 + brightness * 0.48) * weatherNow.lightMultiplier; // was 0.12+0.38 — "increase in general lighting," and truly lighting the place up
-    this.sun.intensity = (0.4 + brightness * 2.0) * weatherNow.lightMultiplier; // was 0.25+1.65 — the sun should be the one actually lighting the place, not just casting shadows
+    // TF2-style: a strong, even fill from the sky and a gentler sun, so
+    // shaded sides stay readable and the light reads soft and painted
+    // rather than harsh.
+    this.ambient.intensity = (0.3 + brightness * 0.5) * weatherNow.lightMultiplier;
+    this.sun.intensity = (0.35 + brightness * 1.45) * weatherNow.lightMultiplier;
     // A warm-to-neutral color shift as the sun climbs (low angle = warm
     // low light, overhead = closer to neutral white) — real sunlight
     // isn't a flat white at every time of day, and a fixed-color
@@ -990,6 +1231,7 @@ export class GameEngine {
       const recentlyHit = alive && e.getTimeSinceLastHit() < GameEngine.ENEMY_HEALTHBAR_AFTER_HIT_SECONDS;
       e.setHealthBarVisible(alive && (isLocked || withinAttackRadius || aimedAt || recentlyHit));
     });
+    this.speech.update(dt);
     this.damageNumbers.update(dt);
     this.goldManager.update(dt, playerPos);
   }
